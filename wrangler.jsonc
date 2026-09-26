@@ -7,10 +7,18 @@
 	"name": "stockpass-collector",
 	"main": "src/index.ts",
 	"compatibility_date": "2026-09-25",
+"triggers": { "crons": ["*/5 * * * *"] },
 	"observability": {
 		"enabled": true
 	},
-	"upload_source_maps": true
+	"upload_source_maps": true,
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "stockpass",
+			"database_id": "55df56e9-c9b2-47d0-b29e-a27ae262d8e2"
+		}
+	]
 	/**
 	 * Smart Placement
 	 * https://developers.cloudflare.com/workers/configuration/smart-placement/#smart-placement
