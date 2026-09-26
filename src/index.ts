@@ -1,4 +1,4 @@
-﻿export interface Env { DB: D1Database }
+﻿export interface Env { DB: D1Database; RPC_URL?: string }
 
 const USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 const ULTRA = "https://lite-api.jup.ag/ultra/v1/order"
@@ -62,8 +62,8 @@ async function resolve(env: Env, tickers: string[]): Promise<Token[]> {
   return out
 }
 
-async function mintInfo(tokens: Token[]): Promise<Record<string, { multiplier: number; supply: number }>> {
-  const res = await fetch(RPC, {
+async function mintInfo(tokens: Token[], rpc: string): Promise<Record<string, { multiplier: number; supply: number }>> {
+  const res = await fetch(rpc, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getMultipleAccounts", params: [tokens.map((t) => t.mint), { encoding: "jsonParsed" }] }),
@@ -98,7 +98,7 @@ async function collect(env: Env) {
 
   const ts = Math.floor(Date.now() / 1000)
   const state = marketState(new Date())
-  const info = await mintInfo(tokens)
+  const info = await mintInfo(tokens, env.RPC_URL ?? RPC)
   const rows: any[] = []
 
   for (const t of tokens) {
@@ -138,6 +138,58 @@ export default {
       return Response.json({ inserted: await collect(env) })
     }
 
+    if (url.pathname === "/holdings") {
+      const owner = url.searchParams.get("owner")
+      if (!owner) return Response.json({ error: "owner required" }, { status: 400 })
+      if (!env.RPC_URL) return Response.json({ error: "RPC not configured" }, { status: 500 })
+
+      const { results: tokenRows } = await env.DB.prepare("SELECT ticker, symbol, issuer, mint, decimals FROM tokens").all()
+      const byMint = new Map((tokenRows as any[]).map((t) => [t.mint, t]))
+      const out: any[] = []
+
+      for (const programId of ["TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb", "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"]) {
+        const res = await fetch(env.RPC_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            jsonrpc: "2.0", id: 1, method: "getTokenAccountsByOwner",
+            params: [owner, { programId }, { encoding: "jsonParsed" }],
+          }),
+        })
+        const json: any = await res.json()
+        if (json.error) return Response.json({ error: json.error.message }, { status: 502 })
+        for (const acc of json.result?.value ?? []) {
+          const info = acc.account?.data?.parsed?.info
+          const token = byMint.get(info?.mint)
+          if (!token) continue
+          const raw = Number(info?.tokenAmount?.amount ?? 0)
+          if (raw === 0) continue
+          out.push({ ...token, walletAmount: raw / 10 ** token.decimals })
+        }
+      }
+
+      return Response.json(out, { headers: { "Access-Control-Allow-Origin": "*" } })
+    }
+
+    if (url.pathname === "/series") {
+      const t = url.searchParams.get("ticker")
+      const hours = Math.min(Number(url.searchParams.get("hours") ?? 24), 24 * 14)
+      if (!t) return Response.json({ error: "ticker required" }, { status: 400 })
+      const since = Math.floor(Date.now() / 1000) - hours * 3600
+      const { results } = await env.DB.prepare(
+        `SELECT ts, symbol, issuer, entry_bps, quotable, market_state
+         FROM measurements WHERE ticker = ? AND ts > ? ORDER BY ts`,
+      ).bind(t, since).all()
+      return Response.json(results, { headers: { "Cache-Control": "max-age=120", "Access-Control-Allow-Origin": "*" } })
+    }
+
+    if (url.pathname === "/tokens") {
+      const { results } = await env.DB.prepare(
+        "SELECT ticker, symbol, issuer, mint, decimals FROM tokens ORDER BY ticker, issuer",
+      ).all()
+      return Response.json(results, { headers: { "Cache-Control": "max-age=3600", "Access-Control-Allow-Origin": "*" } })
+    }
+
     if (url.pathname === "/stats") {
       const { results: history } = await env.DB.prepare(
         `SELECT symbol, issuer, ticker, market_state, COUNT(*) AS samples,
@@ -148,7 +200,7 @@ export default {
       ).bind(Math.floor(Date.now() / 1000) - 30 * 86400).all()
 
       const { results: latest } = await env.DB.prepare(
-        `SELECT m.symbol, m.ticker, m.issuer, m.entry_bps, m.exit_bps, m.quotable, m.multiplier, m.supply, m.ts, m.market_state
+        `SELECT m.symbol, m.ticker, m.issuer, m.buy_px, m.sell_px, m.entry_bps, m.exit_bps, m.quotable, m.multiplier, m.supply, m.ts, m.market_state
          FROM measurements m
          JOIN (SELECT symbol, MAX(ts) AS ts FROM measurements GROUP BY symbol) last
            ON last.symbol = m.symbol AND last.ts = m.ts`,
@@ -163,3 +215,7 @@ export default {
     return Response.json(results)
   },
 }
+
+
+
+
