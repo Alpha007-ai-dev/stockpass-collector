@@ -1,11 +1,12 @@
-﻿export interface Env { DB: D1Database; RPC_URL?: string }
+﻿export interface Env { DB: D1Database; RPC_URL?: string; ALPACA_KEY?: string; ALPACA_SECRET?: string }
 
 const USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 const ULTRA = "https://lite-api.jup.ag/ultra/v1/order"
 const SEARCH = "https://lite-api.jup.ag/tokens/v2/search?query="
 const RPC = "https://solana-rpc.publicnode.com"
 const SIZE_USD = 1000
-const SLICE = 8
+const SLICE = 6
+
 
 const TICKERS = [
   "SPY","QQQ","GLD","NVDA","TSLA","AAPL","MSFT","META","GOOGL","AMZN","NFLX","AMD","AVGO","ORCL",
@@ -14,7 +15,7 @@ const TICKERS = [
   "JPM","GS","V","DIS","PFE","ABBV","MRK","LLY","CAT","NKE","SBUX","VZ",
 ]
 
-type Token = { ticker: string; symbol: string; issuer: string; mint: string; decimals: number }
+type Token = { ticker: string; symbol: string; issuer: string; mint: string; decimals: number; icon?: string; name?: string }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
@@ -38,23 +39,30 @@ function marketState(now: Date): string {
 
 async function resolve(env: Env, tickers: string[]): Promise<Token[]> {
   const marks = tickers.map(() => "?").join(",")
-  const cached = await env.DB.prepare(`SELECT ticker,symbol,issuer,mint,decimals FROM tokens WHERE ticker IN (${marks})`).bind(...tickers).all()
+  const cached = await env.DB.prepare(`SELECT ticker,symbol,issuer,mint,decimals,icon,name,updated_at FROM tokens WHERE ticker IN (${marks})`).bind(...tickers).all()
   const have = new Map((cached.results as any[]).map((r) => [r.symbol, r as Token]))
+  const lastSeen = new Map((cached.results as any[]).map((r) => [r.ticker as string, Number(r.updated_at)]))
   const out: Token[] = []
 
   for (const t of tickers) {
-    const x = have.get(`${t}x`)
-    const o = have.get(`${t}on`)
-    if (x && o) { out.push(x, o); continue }
+    const cached = [have.get(`${t}x`), have.get(`${t}on`), have.get(`${t}bp`)].filter(Boolean) as Token[]
+    if (cached.length >= 2 && Date.now() / 1000 - (lastSeen.get(t) ?? 0) < 7 * 86400) { out.push(...cached); continue }
     try {
       const json: any = await fetch(SEARCH + t).then((r) => r.json())
       const verified = (json ?? []).filter((z: any) => z.isVerified)
-      for (const suffix of ["x", "on"]) {
-        const z = verified.find((q: any) => q.symbol === t + suffix)
-        if (!z) continue
-        const row: Token = { ticker: t, symbol: t + suffix, issuer: suffix === "x" ? "xStocks" : "Ondo", mint: z.id, decimals: z.decimals }
-        await env.DB.prepare("INSERT OR REPLACE INTO tokens (symbol,ticker,issuer,mint,decimals,updated_at) VALUES (?,?,?,?,?,?)")
-          .bind(row.symbol, row.ticker, row.issuer, row.mint, row.decimals, Math.floor(Date.now() / 1000)).run()
+
+      const candidates: { symbol: string; issuer: string; z: any }[] = []
+      const xs = verified.find((q: any) => q.symbol === t + "x")
+      if (xs) candidates.push({ symbol: t + "x", issuer: "xStocks", z: xs })
+      const od = verified.find((q: any) => q.symbol === t + "on")
+      if (od) candidates.push({ symbol: t + "on", issuer: "Ondo", z: od })
+      const bp = verified.find((q: any) => q.symbol.toUpperCase() === t && /Backpack Securities/i.test(q.name ?? ""))
+      if (bp) candidates.push({ symbol: t + "bp", issuer: "Backpack", z: bp })
+
+      for (const cand of candidates) {
+        const row: Token = { ticker: t, symbol: cand.symbol, issuer: cand.issuer, mint: cand.z.id, decimals: cand.z.decimals, icon: cand.z.icon ?? cand.z.logoURI ?? undefined, name: cand.z.name ?? undefined }
+        await env.DB.prepare("INSERT OR REPLACE INTO tokens (symbol,ticker,issuer,mint,decimals,icon,name,updated_at) VALUES (?,?,?,?,?,?,?,?)")
+          .bind(row.symbol, row.ticker, row.issuer, row.mint, row.decimals, row.icon ?? null, row.name ?? null, Math.floor(Date.now() / 1000)).run()
         out.push(row)
       }
     } catch {}
@@ -88,7 +96,43 @@ async function orderOut(inputMint: string, outputMint: string, amount: string): 
   return String(json.outAmount)
 }
 
+async function collectReference(env: Env) {
+  if (!env.ALPACA_KEY || !env.ALPACA_SECRET) return 0
+  const REFERENCE_TICKERS = TICKERS
+  const ts = Math.floor(Date.now() / 1000)
+  const state = marketState(new Date())
+  try {
+    const url = `https://data.alpaca.markets/v2/stocks/quotes/latest?symbols=${REFERENCE_TICKERS.join(",")}&feed=iex`
+    const res = await fetch(url, {
+      headers: { "APCA-API-KEY-ID": env.ALPACA_KEY, "APCA-API-SECRET-KEY": env.ALPACA_SECRET },
+    })
+    const json: any = await res.json()
+    const rows: any[] = []
+    for (const ticker of REFERENCE_TICKERS) {
+      const q = json?.quotes?.[ticker]
+      if (!q) continue
+      const bid = Number(q.bp ?? 0)
+      const ask = Number(q.ap ?? 0)
+      if (!bid || !ask) continue
+      const quoteTs = q.t ? Math.floor(new Date(q.t).getTime() / 1000) : ts
+      const mid = (bid + ask) / 2
+      const spreadBps = ((ask - bid) / mid) * 10000
+      const stale = ts - quoteTs > 900 || spreadBps > 50 ? 1 : 0
+      rows.push([ts, ticker, bid, ask, mid, null, state, stale])
+    }
+    if (rows.length === 0) return 0
+    const stmt = env.DB.prepare(
+      "INSERT INTO reference_prices (ts,ticker,bid,ask,mid,last_px,market_state,stale) VALUES (?,?,?,?,?,?,?,?)",
+    )
+    await env.DB.batch(rows.map((r) => stmt.bind(...r)))
+    return rows.length
+  } catch (e) {
+    return 0
+  }
+}
+
 async function collect(env: Env) {
+  await collectReference(env)
   const slices = Math.ceil(TICKERS.length / SLICE)
   const index = Math.floor(Date.now() / 300000) % slices
   const tickers = TICKERS.slice(index * SLICE, index * SLICE + SLICE)
@@ -134,6 +178,13 @@ export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     const url = new URL(req.url)
 
+    if (url.pathname === "/resolve") {
+      const from = Number(url.searchParams.get("from") ?? 0)
+      const slice = TICKERS.slice(from, from + 12)
+      const found = await resolve(env, slice)
+      return Response.json({ from, checked: slice.length, tokens: found.length, next: from + 12 })
+    }
+
     if (url.pathname === "/run") {
       return Response.json({ inserted: await collect(env) })
     }
@@ -171,6 +222,33 @@ export default {
       return Response.json(out, { headers: { "Access-Control-Allow-Origin": "*" } })
     }
 
+    if (url.pathname === "/collateral") {
+      const MARKETS = [
+        { name: "Kamino xStocks Market", pubkey: "5wJeMrUYECGq41fxRESKALVcHnNX26TAWy4W98yULsua" },
+        { name: "Kamino Sentora xStocks", pubkey: "8BNUWRSibVasaAmhYpBCFpGgMisGKfVAf9ho3Cmf6vjr" },
+      ]
+      const out: any[] = []
+      for (const m of MARKETS) {
+        try {
+          const rows: any = await fetch(`https://api.kamino.finance/kamino-market/${m.pubkey}/reserves/metrics`).then((r) => r.json())
+          for (const r of rows ?? []) {
+            const ltv = Number(r.maxLtv)
+            if (!ltv) continue
+            out.push({
+              symbol: r.liquidityToken,
+              mint: r.liquidityTokenMint,
+              market: m.name,
+              maxLtv: ltv,
+              borrowApy: Number(r.borrowApy),
+              supplyApy: Number(r.supplyApy),
+              marketUsd: Math.round(Number(r.totalSupplyUsd ?? 0)),
+            })
+          }
+        } catch {}
+      }
+      return Response.json(out, { headers: { "Cache-Control": "max-age=1800", "Access-Control-Allow-Origin": "*" } })
+    }
+
     if (url.pathname === "/series") {
       const t = url.searchParams.get("ticker")
       const hours = Math.min(Number(url.searchParams.get("hours") ?? 24), 24 * 14)
@@ -183,9 +261,28 @@ export default {
       return Response.json(results, { headers: { "Cache-Control": "max-age=120", "Access-Control-Allow-Origin": "*" } })
     }
 
+    if (url.pathname === "/logo") {
+      const symbol = url.searchParams.get("symbol")
+      if (!symbol) return new Response("symbol required", { status: 400 })
+      const row: any = await env.DB.prepare("SELECT icon FROM tokens WHERE symbol = ?").bind(symbol).first()
+      if (!row?.icon) return new Response("not found", { status: 404 })
+      const upstream = await fetch(row.icon, {
+        headers: { "User-Agent": "Mozilla/5.0", Accept: "image/*,*/*" },
+        redirect: "follow",
+      })
+      if (!upstream.ok) return new Response("upstream error", { status: 502 })
+      return new Response(upstream.body, {
+        headers: {
+          "Content-Type": upstream.headers.get("Content-Type") ?? "image/png",
+          "Cache-Control": "public, max-age=86400",
+          "Access-Control-Allow-Origin": "*",
+        },
+      })
+    }
+
     if (url.pathname === "/tokens") {
       const { results } = await env.DB.prepare(
-        "SELECT ticker, symbol, issuer, mint, decimals FROM tokens ORDER BY ticker, issuer",
+        "SELECT ticker, symbol, issuer, mint, decimals, icon, name FROM tokens ORDER BY ticker, issuer",
       ).all()
       return Response.json(results, { headers: { "Cache-Control": "max-age=3600", "Access-Control-Allow-Origin": "*" } })
     }
@@ -206,7 +303,14 @@ export default {
            ON last.symbol = m.symbol AND last.ts = m.ts`,
       ).all()
 
-      return Response.json({ latest, history }, { headers: { "Cache-Control": "max-age=60", "Access-Control-Allow-Origin": "*" } })
+      const { results: reference } = await env.DB.prepare(
+        `SELECT r.ticker, r.bid, r.ask, r.mid, r.market_state, r.stale, r.ts
+         FROM reference_prices r
+         JOIN (SELECT ticker AS t, MAX(ts) AS mts FROM reference_prices GROUP BY ticker) last
+           ON last.t = r.ticker AND last.mts = r.ts`,
+      ).all()
+
+      return Response.json({ latest, history, reference }, { headers: { "Cache-Control": "max-age=60", "Access-Control-Allow-Origin": "*" } })
     }
 
     const { results } = await env.DB.prepare(
@@ -215,6 +319,21 @@ export default {
     return Response.json(results)
   },
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
