@@ -255,7 +255,7 @@ export default {
       if (!t) return Response.json({ error: "ticker required" }, { status: 400 })
       const since = Math.floor(Date.now() / 1000) - hours * 3600
       const { results } = await env.DB.prepare(
-        `SELECT ts, symbol, issuer, entry_bps, quotable, market_state
+        `SELECT ts, symbol, issuer, entry_bps, exit_bps, buy_px, quotable, market_state
          FROM measurements WHERE ticker = ? AND ts > ? ORDER BY ts`,
       ).bind(t, since).all()
       return Response.json(results, { headers: { "Cache-Control": "max-age=120", "Access-Control-Allow-Origin": "*" } })
@@ -319,6 +319,8 @@ export default {
     return Response.json(results)
   },
 }
+
+
 
 
 
