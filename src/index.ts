@@ -441,3 +441,37 @@ export default {
 
 
 
+
+/** Daily: refresh upcoming earnings dates from Finnhub.
+ *  One request per ticker, well inside the subrequest budget.
+ *  Dividends and splits are not available on the free tier. */
+async function syncEarnings(env: Env): Promise<void> {
+  if (!env.FINNHUB_KEY) return
+  const { results } = await env.DB.prepare("SELECT DISTINCT ticker FROM tokens ORDER BY ticker").all()
+  const tickers = (results as any[]).map((r) => r.ticker as string)
+  const now = Math.floor(Date.now() / 1000)
+  const today = new Date().toISOString().slice(0, 10)
+  const plus120 = new Date(Date.now() + 120 * 86400000).toISOString().slice(0, 10)
+
+  await env.DB.prepare("DELETE FROM events WHERE kind = 'earnings' AND event_date < date('now')").run()
+
+  for (const t of tickers) {
+    try {
+      const r = await fetch(
+        `https://finnhub.io/api/v1/calendar/earnings?symbol=${t}&from=${today}&to=${plus120}&token=${env.FINNHUB_KEY}`
+      )
+      if (!r.ok) continue
+      const j: any = await r.json()
+      for (const row of (j?.earningsCalendar ?? []).slice(0, 2)) {
+        if (!row.date) continue
+        await env.DB.prepare(
+          `INSERT INTO events (id, ticker, kind, event_date, detail, amount, updated_at)
+           VALUES (?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
+             event_date=excluded.event_date, detail=excluded.detail, updated_at=excluded.updated_at`
+        ).bind(`${t}-earn-${row.date}`, t, "earnings", row.date,
+               row.hour === "bmo" ? "before market open" : row.hour === "amc" ? "after market close" : null,
+               null, now).run()
+      }
+    } catch {}
+  }
+}

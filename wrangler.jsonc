@@ -7,7 +7,7 @@
 	"name": "stockpass-collector",
 	"main": "src/index.ts",
 	"compatibility_date": "2026-09-25",
-"triggers": { "crons": ["*/5 * * * *"] },
+"triggers": { "crons": ["*/5 * * * *", "0 3 * * *"] },
 	"observability": {
 		"enabled": true
 	},
