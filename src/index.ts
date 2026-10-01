@@ -1,4 +1,4 @@
-﻿export interface Env { DB: D1Database; RPC_URL?: string; ALPACA_KEY?: string; ALPACA_SECRET?: string }
+export interface Env { DB: D1Database; RPC_URL?: string; ALPACA_KEY?: string; ALPACA_SECRET?: string; FINNHUB_KEY?: string }
 
 const USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 const ULTRA = "https://lite-api.jup.ag/ultra/v1/order"
@@ -220,6 +220,107 @@ export default {
       }
 
       return Response.json(out, { headers: { "Access-Control-Allow-Origin": "*" } })
+    }
+
+    if (url.pathname === "/underlying") {
+      const ticker = url.searchParams.get("ticker")
+      const headers = { "Cache-Control": "max-age=600", "Access-Control-Allow-Origin": "*" }
+      if (ticker) {
+        const profile = await env.DB.prepare("SELECT * FROM underlying WHERE ticker = ?").bind(ticker).first()
+        const { results: evs } = await env.DB.prepare(
+          "SELECT kind, event_date, detail, amount FROM events WHERE ticker = ? ORDER BY event_date DESC LIMIT 12"
+        ).bind(ticker).all()
+        return Response.json({ profile: profile ?? null, events: evs ?? [] }, { headers })
+      }
+      const { results: all } = await env.DB.prepare("SELECT * FROM underlying").all()
+      const { results: upcoming } = await env.DB.prepare(
+        "SELECT ticker, kind, event_date, detail, amount FROM events WHERE event_date >= date('now') ORDER BY event_date"
+      ).all()
+      return Response.json({ profiles: all ?? [], upcoming: upcoming ?? [] }, { headers })
+    }
+
+    if (url.pathname === "/underlying-sync") {
+      if (!env.FINNHUB_KEY) return Response.json({ error: "FINNHUB_KEY not configured" }, { status: 500 })
+      const from = Number(url.searchParams.get("from") ?? "0")
+      const take = Number(url.searchParams.get("take") ?? "6")
+
+      const { results: tickers } = await env.DB.prepare("SELECT DISTINCT ticker FROM tokens ORDER BY ticker").all()
+      const slice = (tickers as any[]).slice(from, from + take).map((r) => r.ticker as string)
+      const now = Math.floor(Date.now() / 1000)
+      const key = env.FINNHUB_KEY
+      const today = new Date().toISOString().slice(0, 10)
+      const plus90 = new Date(Date.now() + 90 * 86400000).toISOString().slice(0, 10)
+      const minus400 = new Date(Date.now() - 400 * 86400000).toISOString().slice(0, 10)
+      const out: any[] = []
+
+      const get = async (path: string) => {
+        const r = await fetch(`https://finnhub.io/api/v1${path}&token=${key}`)
+        if (!r.ok) return null
+        return r.json().catch(() => null)
+      }
+
+      for (const t of slice) {
+        const note: any = { ticker: t }
+        try {
+          const p: any = await get(`/stock/profile2?symbol=${t}`)
+          if (p && p.name) {
+            await env.DB.prepare(
+              `INSERT INTO underlying (ticker, name, industry, exchange, country, market_cap, employees, ipo, weburl, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(ticker) DO UPDATE SET name=excluded.name, industry=excluded.industry,
+                 exchange=excluded.exchange, country=excluded.country, market_cap=excluded.market_cap,
+                 employees=excluded.employees, ipo=excluded.ipo, weburl=excluded.weburl, updated_at=excluded.updated_at`
+            ).bind(t, p.name ?? null, p.finnhubIndustry ?? null, p.exchange ?? null, p.country ?? null,
+                   p.marketCapitalization ?? null, p.employeeTotal ?? null, p.ipo ?? null, p.weburl ?? null, now).run()
+            note.profile = true
+          }
+
+          const d: any = await get(`/stock/dividend?symbol=${t}&from=${minus400}&to=${plus90}`)
+          for (const row of (Array.isArray(d) ? d : []).slice(-4)) {
+            if (!row.date) continue
+            await env.DB.prepare(
+              `INSERT INTO events (id, ticker, kind, event_date, detail, amount, updated_at)
+               VALUES (?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
+                 event_date=excluded.event_date, detail=excluded.detail, amount=excluded.amount, updated_at=excluded.updated_at`
+            ).bind(`${t}-div-${row.date}`, t, "dividend", row.date,
+                   row.payDate ? `pay ${row.payDate}` : null, row.amount ?? null, now).run()
+            note.dividends = (note.dividends ?? 0) + 1
+          }
+
+          const e: any = await get(`/calendar/earnings?symbol=${t}&from=${today}&to=${plus90}`)
+          for (const row of (e?.earningsCalendar ?? []).slice(0, 2)) {
+            if (!row.date) continue
+            await env.DB.prepare(
+              `INSERT INTO events (id, ticker, kind, event_date, detail, amount, updated_at)
+               VALUES (?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
+                 event_date=excluded.event_date, detail=excluded.detail, updated_at=excluded.updated_at`
+            ).bind(`${t}-earn-${row.date}`, t, "earnings", row.date,
+                   row.hour === "bmo" ? "before market open" : row.hour === "amc" ? "after market close" : null,
+                   null, now).run()
+            note.earnings = (note.earnings ?? 0) + 1
+          }
+
+          const s: any = await get(`/stock/split?symbol=${t}&from=2015-01-01&to=${today}`)
+          for (const row of (Array.isArray(s) ? s : []).slice(-2)) {
+            if (!row.date) continue
+            await env.DB.prepare(
+              `INSERT INTO events (id, ticker, kind, event_date, detail, amount, updated_at)
+               VALUES (?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET detail=excluded.detail, updated_at=excluded.updated_at`
+            ).bind(`${t}-split-${row.date}`, t, "split", row.date,
+                   row.fromFactor && row.toFactor ? `${row.toFactor}:${row.fromFactor} split` : null, null, now).run()
+            note.splits = (note.splits ?? 0) + 1
+          }
+        } catch (err: any) {
+          note.error = String(err?.message ?? err)
+        }
+        out.push(note)
+      }
+
+      const next = from + take
+      return Response.json(
+        { done: slice.length, next: next < (tickers as any[]).length ? next : null, detail: out },
+        { headers: { "Access-Control-Allow-Origin": "*" } }
+      )
     }
 
     if (url.pathname === "/collateral") {
