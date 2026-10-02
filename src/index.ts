@@ -323,6 +323,104 @@ export default {
       )
     }
 
+    if (url.pathname === "/prices") {
+      const symbols = (url.searchParams.get("symbols") ?? "")
+        .split(",").map((s) => s.trim()).filter(Boolean).slice(0, 25)
+      if (!symbols.length) return Response.json({ error: "symbols required" }, { status: 400 })
+
+      const hours = Math.min(168, Math.max(1, Number(url.searchParams.get("hours") ?? "24")))
+      const cutoff = Math.floor(Date.now() / 1000) - hours * 3600
+      const marks = symbols.map(() => "?").join(",")
+
+      // one row per symbol: the measurement closest to the cutoff, looking back
+      const { results } = await env.DB.prepare(
+        `SELECT m.symbol, m.buy_px, m.ts
+         FROM measurements m
+         JOIN (
+           SELECT symbol, MAX(ts) AS ts
+           FROM measurements
+           WHERE symbol IN (${marks}) AND ts <= ? AND quotable = 1 AND buy_px IS NOT NULL
+           GROUP BY symbol
+         ) AS pick ON pick.symbol = m.symbol AND pick.ts = m.ts`
+      ).bind(...symbols, cutoff).all()
+
+      const then: Record<string, { px: number; ts: number }> = {}
+      for (const r of (results as any[]) ?? []) {
+        then[r.symbol] = { px: Number(r.buy_px), ts: Number(r.ts) }
+      }
+      return Response.json(
+        { hours, then },
+        { headers: { "Cache-Control": "max-age=300", "Access-Control-Allow-Origin": "*" } }
+      )
+    }
+
+    if (url.pathname === "/reliability") {
+      const symbol = url.searchParams.get("symbol")
+      const headers = { "Cache-Control": "max-age=900", "Access-Control-Allow-Origin": "*" }
+
+      if (symbol) {
+        const row = await env.DB.prepare(
+          `SELECT COUNT(*) AS samples,
+                  ROUND(AVG(CASE WHEN quotable=1 THEN 1.0 ELSE 0.0 END)*100, 0) AS availability,
+                  MIN(CASE WHEN quotable=1 AND entry_bps < 200 THEN entry_bps END) AS min_entry,
+                  MAX(CASE WHEN quotable=1 AND entry_bps < 200 THEN entry_bps END) AS max_entry,
+                  ROUND(AVG(CASE WHEN quotable=1 AND entry_bps < 200 THEN entry_bps END), 1) AS avg_entry,
+                  MIN(ts) AS since
+           FROM measurements WHERE symbol = ? AND market_state = 'open'`
+        ).bind(symbol).first()
+
+        const all = await env.DB.prepare(
+          `SELECT COUNT(*) AS samples,
+                  ROUND(AVG(CASE WHEN quotable=1 THEN 1.0 ELSE 0.0 END)*100, 0) AS availability
+           FROM measurements WHERE symbol = ?`
+        ).bind(symbol).first()
+
+        return Response.json({ symbol, open: row ?? null, overall: all ?? null }, { headers })
+      }
+
+      const { results: issuers } = await env.DB.prepare(
+        `SELECT issuer,
+                COUNT(*) AS samples,
+                COUNT(DISTINCT symbol) AS tokens,
+                ROUND(AVG(CASE WHEN quotable=1 THEN 1.0 ELSE 0.0 END)*100, 1) AS availability,
+                ROUND(AVG(CASE WHEN quotable=1 AND entry_bps BETWEEN 0 AND 200 THEN entry_bps END), 1) AS avg_entry
+         FROM measurements GROUP BY issuer ORDER BY availability DESC`
+      ).all()
+
+      const { results: reliable } = await env.DB.prepare(
+        `SELECT t.issuer AS issuer, COUNT(*) AS n FROM (
+           SELECT issuer, symbol, AVG(CASE WHEN quotable=1 THEN 1.0 ELSE 0.0 END) AS a
+           FROM measurements GROUP BY issuer, symbol
+         ) AS t WHERE t.a >= 0.8 GROUP BY t.issuer`
+      ).all()
+
+      const { results: never } = await env.DB.prepare(
+        `SELECT t.issuer AS issuer, COUNT(*) AS n FROM (
+           SELECT issuer, symbol, SUM(quotable) AS q
+           FROM measurements GROUP BY issuer, symbol
+         ) AS t WHERE t.q = 0 GROUP BY t.issuer`
+      ).all()
+
+      const meta = await env.DB.prepare(
+        `SELECT COUNT(*) AS total, MIN(ts) AS since, COUNT(DISTINCT symbol) AS tokens FROM measurements`
+      ).first()
+
+      const rel = new Map((reliable as any[]).map((r) => [r.issuer, r.n]))
+      const nev = new Map((never as any[]).map((r) => [r.issuer, r.n]))
+
+      return Response.json(
+        {
+          issuers: (issuers as any[]).map((r) => ({
+            ...r,
+            reliable_tokens: rel.get(r.issuer) ?? 0,
+            never_quotable: nev.get(r.issuer) ?? 0,
+          })),
+          meta,
+        },
+        { headers }
+      )
+    }
+
     if (url.pathname === "/collateral") {
       const MARKETS = [
         { name: "Kamino xStocks Market", pubkey: "5wJeMrUYECGq41fxRESKALVcHnNX26TAWy4W98yULsua" },
