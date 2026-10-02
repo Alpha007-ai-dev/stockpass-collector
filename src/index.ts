@@ -425,6 +425,13 @@ export default {
         return Response.json({ symbol, open: row ?? null, overall: all ?? null }, { headers })
       }
 
+      if (url.searchParams.get("all")) {
+        const { results: all } = await env.DB.prepare(
+          "SELECT symbol, ticker, issuer, samples, quotable_count, availability, avg_entry FROM token_reliability ORDER BY ticker, issuer"
+        ).all()
+        return Response.json({ tokens: all ?? [] }, { headers })
+      }
+
       const { results: cached } = await env.DB.prepare(
         "SELECT * FROM reliability_cache ORDER BY availability DESC"
       ).all()
@@ -615,8 +622,9 @@ async function buildReliabilityCache(env: Env): Promise<void> {
   ).all()
 
   const { results: perToken } = await env.DB.prepare(
-    `SELECT issuer, symbol, COUNT(*) AS samples, SUM(quotable) AS q,
-            ROUND(AVG(CASE WHEN quotable=1 THEN 1.0 ELSE 0.0 END)*100, 0) AS availability
+    `SELECT issuer, ticker, symbol, COUNT(*) AS samples, SUM(quotable) AS q,
+            ROUND(AVG(CASE WHEN quotable=1 THEN 1.0 ELSE 0.0 END)*100, 0) AS availability,
+            ROUND(AVG(CASE WHEN quotable=1 AND entry_bps BETWEEN 0 AND 200 THEN entry_bps END), 1) AS avg_entry
      FROM measurements GROUP BY issuer, symbol`
   ).all()
 
@@ -656,5 +664,19 @@ async function buildReliabilityCache(env: Env): Promise<void> {
       "INSERT INTO weakest_cache (symbol, issuer, samples, quotable_count, availability, updated_at) VALUES (?,?,?,?,?,?)"
     )
     await env.DB.batch(weakest.map((r) => w.bind(r.symbol, r.issuer, r.samples, r.q, r.availability, now)))
+  }
+
+  const tStmt = env.DB.prepare(
+    `INSERT INTO token_reliability (symbol, ticker, issuer, samples, quotable_count, availability, avg_entry, updated_at)
+     VALUES (?,?,?,?,?,?,?,?)
+     ON CONFLICT(symbol) DO UPDATE SET ticker=excluded.ticker, issuer=excluded.issuer,
+       samples=excluded.samples, quotable_count=excluded.quotable_count,
+       availability=excluded.availability, avg_entry=excluded.avg_entry, updated_at=excluded.updated_at`
+  )
+  for (let i = 0; i < rows.length; i += 40) {
+    const chunk = rows.slice(i, i + 40)
+    await env.DB.batch(
+      chunk.map((r) => tStmt.bind(r.symbol, r.ticker ?? null, r.issuer, r.samples, r.q, r.availability, r.avg_entry ?? null, now))
+    )
   }
 }
