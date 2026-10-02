@@ -163,11 +163,43 @@ async function collect(env: Env) {
       rows.push([ts, t.ticker, t.symbol, t.issuer, SIZE_USD, state, 0, null, null, null, null, m, supply])
     }
   }
+  // One token per run also gets measured at other sizes, so we can show how
+  // execution cost scales. Kept in a separate table so the main series stays clean.
+  const SIZES = [100, 10000]
+  const pick = tokens[Math.floor(Math.random() * tokens.length)]
+  const sizeRows: any[] = []
+  if (pick) {
+    const pm = info[pick.mint]?.multiplier ?? 1
+    for (const size of SIZES) {
+      try {
+        const raw = await orderOut(USDC, pick.mint, String(size * 1e6))
+        await sleep(400)
+        const shares = (Number(raw) / 10 ** pick.decimals) * pm
+        const back = await orderOut(pick.mint, USDC, raw)
+        await sleep(400)
+        const buy = size / shares
+        const sell = Number(back) / 1e6 / shares
+        const mid = (buy + sell) / 2
+        sizeRows.push([ts, pick.ticker, pick.symbol, pick.issuer, size, state, 1,
+          Math.round((buy / mid - 1) * 10000), Math.round((1 - sell / mid) * 10000)])
+      } catch {
+        sizeRows.push([ts, pick.ticker, pick.symbol, pick.issuer, size, state, 0, null, null])
+      }
+    }
+  }
+
 
   const stmt = env.DB.prepare(
     "INSERT INTO measurements (ts,ticker,symbol,issuer,size_usd,market_state,quotable,buy_px,sell_px,entry_bps,exit_bps,multiplier,supply) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
   )
   await env.DB.batch(rows.map((r) => stmt.bind(...r)))
+
+  if (sizeRows.length) {
+    const sizeStmt = env.DB.prepare(
+      "INSERT INTO size_tests (ts,ticker,symbol,issuer,size_usd,market_state,quotable,entry_bps,exit_bps) VALUES (?,?,?,?,?,?,?,?,?)",
+    )
+    await env.DB.batch(sizeRows.map((r) => sizeStmt.bind(...r)))
+  }
   return rows.length
 }
 
@@ -371,7 +403,11 @@ export default {
 
         const all = await env.DB.prepare(
           `SELECT COUNT(*) AS samples,
-                  ROUND(AVG(CASE WHEN quotable=1 THEN 1.0 ELSE 0.0 END)*100, 0) AS availability
+                  ROUND(AVG(CASE WHEN quotable=1 THEN 1.0 ELSE 0.0 END)*100, 0) AS availability,
+                  MIN(CASE WHEN quotable=1 AND entry_bps < 200 THEN entry_bps END) AS min_entry,
+                  MAX(CASE WHEN quotable=1 AND entry_bps < 200 THEN entry_bps END) AS max_entry,
+                  MIN(CASE WHEN quotable=1 AND exit_bps < 200 THEN exit_bps END) AS min_exit,
+                  MAX(CASE WHEN quotable=1 AND exit_bps < 200 THEN exit_bps END) AS max_exit
            FROM measurements WHERE symbol = ?`
         ).bind(symbol).first()
 
