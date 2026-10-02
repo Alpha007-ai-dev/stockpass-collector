@@ -204,7 +204,12 @@ async function collect(env: Env) {
 }
 
 export default {
-  async scheduled(_e: ScheduledEvent, env: Env, ctx: ExecutionContext) {
+  async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
+    if (event.cron === "0 3 * * *") {
+      ctx.waitUntil(syncEarnings(env))
+      ctx.waitUntil(buildReliabilityCache(env))
+      return
+    }
     ctx.waitUntil(collect(env))
   },
   async fetch(req: Request, env: Env): Promise<Response> {
@@ -386,6 +391,12 @@ export default {
       )
     }
 
+    if (url.pathname === "/rebuild-cache") {
+      await buildReliabilityCache(env)
+      const { results } = await env.DB.prepare("SELECT * FROM reliability_cache").all()
+      return Response.json({ ok: true, issuers: results ?? [] }, { headers: { "Access-Control-Allow-Origin": "*" } })
+    }
+
     if (url.pathname === "/reliability") {
       const symbol = url.searchParams.get("symbol")
       const headers = { "Cache-Control": "max-age=900", "Access-Control-Allow-Origin": "*" }
@@ -414,45 +425,25 @@ export default {
         return Response.json({ symbol, open: row ?? null, overall: all ?? null }, { headers })
       }
 
-      const { results: issuers } = await env.DB.prepare(
-        `SELECT issuer,
-                COUNT(*) AS samples,
-                COUNT(DISTINCT symbol) AS tokens,
-                ROUND(AVG(CASE WHEN quotable=1 THEN 1.0 ELSE 0.0 END)*100, 1) AS availability,
-                ROUND(AVG(CASE WHEN quotable=1 AND entry_bps BETWEEN 0 AND 200 THEN entry_bps END), 1) AS avg_entry
-         FROM measurements GROUP BY issuer ORDER BY availability DESC`
+      const { results: cached } = await env.DB.prepare(
+        "SELECT * FROM reliability_cache ORDER BY availability DESC"
       ).all()
 
-      const { results: reliable } = await env.DB.prepare(
-        `SELECT t.issuer AS issuer, COUNT(*) AS n FROM (
-           SELECT issuer, symbol, AVG(CASE WHEN quotable=1 THEN 1.0 ELSE 0.0 END) AS a
-           FROM measurements GROUP BY issuer, symbol
-         ) AS t WHERE t.a >= 0.8 GROUP BY t.issuer`
+      const { results: weak } = await env.DB.prepare(
+        "SELECT * FROM weakest_cache ORDER BY availability LIMIT 8"
       ).all()
 
-      const { results: never } = await env.DB.prepare(
-        `SELECT t.issuer AS issuer, COUNT(*) AS n FROM (
-           SELECT issuer, symbol, SUM(quotable) AS q
-           FROM measurements GROUP BY issuer, symbol
-         ) AS t WHERE t.q = 0 GROUP BY t.issuer`
-      ).all()
-
-      const meta = await env.DB.prepare(
-        `SELECT COUNT(*) AS total, MIN(ts) AS since, COUNT(DISTINCT symbol) AS tokens FROM measurements`
-      ).first()
-
-      const rel = new Map((reliable as any[]).map((r) => [r.issuer, r.n]))
-      const nev = new Map((never as any[]).map((r) => [r.issuer, r.n]))
+      const list = (cached as any[]) ?? []
+      const meta = list.length
+        ? {
+            total: list.reduce((n, r) => n + Number(r.samples ?? 0), 0),
+            tokens: list.reduce((n, r) => n + Number(r.tokens ?? 0), 0),
+            updated_at: list[0]?.updated_at ?? null,
+          }
+        : null
 
       return Response.json(
-        {
-          issuers: (issuers as any[]).map((r) => ({
-            ...r,
-            reliable_tokens: rel.get(r.issuer) ?? 0,
-            never_quotable: nev.get(r.issuer) ?? 0,
-          })),
-          meta,
-        },
+        { issuers: list, weakest: (weak as any[]) ?? [], meta },
         { headers }
       )
     }
@@ -607,5 +598,63 @@ async function syncEarnings(env: Env): Promise<void> {
                null, now).run()
       }
     } catch {}
+  }
+}
+
+/** Daily: recompute issuer-level reliability into a small cache table.
+ *  The live query scans every measurement row, which is far too expensive
+ *  to run on each request. */
+async function buildReliabilityCache(env: Env): Promise<void> {
+  const { results: issuers } = await env.DB.prepare(
+    `SELECT issuer,
+            COUNT(*) AS samples,
+            COUNT(DISTINCT symbol) AS tokens,
+            ROUND(AVG(CASE WHEN quotable=1 THEN 1.0 ELSE 0.0 END)*100, 1) AS availability,
+            ROUND(AVG(CASE WHEN quotable=1 AND entry_bps BETWEEN 0 AND 200 THEN entry_bps END), 1) AS avg_entry
+     FROM measurements GROUP BY issuer`
+  ).all()
+
+  const { results: perToken } = await env.DB.prepare(
+    `SELECT issuer, symbol, COUNT(*) AS samples, SUM(quotable) AS q,
+            ROUND(AVG(CASE WHEN quotable=1 THEN 1.0 ELSE 0.0 END)*100, 0) AS availability
+     FROM measurements GROUP BY issuer, symbol`
+  ).all()
+
+  const now = Math.floor(Date.now() / 1000)
+  const rows = (perToken as any[]) ?? []
+
+  const reliable = new Map<string, number>()
+  const never = new Map<string, number>()
+  for (const r of rows) {
+    if (r.availability >= 80) reliable.set(r.issuer, (reliable.get(r.issuer) ?? 0) + 1)
+    if (Number(r.q) === 0) never.set(r.issuer, (never.get(r.issuer) ?? 0) + 1)
+  }
+
+  const stmt = env.DB.prepare(
+    `INSERT INTO reliability_cache (issuer, samples, tokens, availability, avg_entry, reliable_tokens, never_quotable, updated_at)
+     VALUES (?,?,?,?,?,?,?,?)
+     ON CONFLICT(issuer) DO UPDATE SET samples=excluded.samples, tokens=excluded.tokens,
+       availability=excluded.availability, avg_entry=excluded.avg_entry,
+       reliable_tokens=excluded.reliable_tokens, never_quotable=excluded.never_quotable,
+       updated_at=excluded.updated_at`
+  )
+  await env.DB.batch(
+    (issuers as any[]).map((r) =>
+      stmt.bind(r.issuer, r.samples, r.tokens, r.availability, r.avg_entry,
+                reliable.get(r.issuer) ?? 0, never.get(r.issuer) ?? 0, now)
+    )
+  )
+
+  const weakest = rows
+    .filter((r) => r.samples >= 20)
+    .sort((a, b) => a.availability - b.availability)
+    .slice(0, 8)
+
+  await env.DB.prepare("DELETE FROM weakest_cache").run()
+  if (weakest.length) {
+    const w = env.DB.prepare(
+      "INSERT INTO weakest_cache (symbol, issuer, samples, quotable_count, availability, updated_at) VALUES (?,?,?,?,?,?)"
+    )
+    await env.DB.batch(weakest.map((r) => w.bind(r.symbol, r.issuer, r.samples, r.q, r.availability, now)))
   }
 }
