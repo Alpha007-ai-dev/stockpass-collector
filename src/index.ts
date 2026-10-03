@@ -408,6 +408,9 @@ export default {
                   MIN(CASE WHEN quotable=1 AND entry_bps < 200 THEN entry_bps END) AS min_entry,
                   MAX(CASE WHEN quotable=1 AND entry_bps < 200 THEN entry_bps END) AS max_entry,
                   ROUND(AVG(CASE WHEN quotable=1 AND entry_bps < 200 THEN entry_bps END), 1) AS avg_entry,
+                  MIN(CASE WHEN quotable=1 AND exit_bps < 200 THEN exit_bps END) AS min_exit,
+                  MAX(CASE WHEN quotable=1 AND exit_bps < 200 THEN exit_bps END) AS max_exit,
+                  ROUND(AVG(CASE WHEN quotable=1 AND exit_bps < 200 THEN exit_bps END), 1) AS avg_exit,
                   MIN(ts) AS since
            FROM measurements WHERE symbol = ? AND market_state = 'open'`
         ).bind(symbol).first()
@@ -521,6 +524,15 @@ export default {
     }
 
     if (url.pathname === "/stats") {
+      const TTL = 300
+      const nowTs = Math.floor(Date.now() / 1000)
+      const hit = await env.DB.prepare("SELECT body, updated_at FROM response_cache WHERE key = ?").bind("stats").first()
+      if (hit && nowTs - Number((hit as any).updated_at) < TTL) {
+        return new Response(String((hit as any).body), {
+          headers: { "Content-Type": "application/json", "Cache-Control": "max-age=120", "Access-Control-Allow-Origin": "*", "X-Cache": "hit" },
+        })
+      }
+
       const { results: history } = await env.DB.prepare(
         `SELECT symbol, issuer, ticker, market_state, COUNT(*) AS samples,
                 AVG(entry_bps) AS avg_entry, MIN(entry_bps) AS min_entry, MAX(entry_bps) AS max_entry,
@@ -543,7 +555,14 @@ export default {
            ON last.t = r.ticker AND last.mts = r.ts`,
       ).all()
 
-      return Response.json({ latest, history, reference }, { headers: { "Cache-Control": "max-age=60", "Access-Control-Allow-Origin": "*" } })
+      const body = JSON.stringify({ latest, history, reference })
+      await env.DB.prepare(
+        "INSERT INTO response_cache (key, body, updated_at) VALUES (?,?,?) ON CONFLICT(key) DO UPDATE SET body=excluded.body, updated_at=excluded.updated_at"
+      ).bind("stats", body, nowTs).run()
+
+      return new Response(body, {
+        headers: { "Content-Type": "application/json", "Cache-Control": "max-age=120", "Access-Control-Allow-Origin": "*", "X-Cache": "miss" },
+      })
     }
 
     const { results } = await env.DB.prepare(
