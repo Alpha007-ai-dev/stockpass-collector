@@ -1,4 +1,4 @@
-export interface Env { DB: D1Database; RPC_URL?: string; ALPACA_KEY?: string; ALPACA_SECRET?: string; FINNHUB_KEY?: string }
+export interface Env { DB: D1Database; RPC_URL?: string; ALPACA_KEY?: string; ALPACA_SECRET?: string; FINNHUB_KEY?: string; ADMIN_KEY?: string }
 
 const USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 const ULTRA = "https://lite-api.jup.ag/ultra/v1/order"
@@ -392,6 +392,9 @@ export default {
     }
 
     if (url.pathname === "/rebuild-cache") {
+      if (!env.ADMIN_KEY || url.searchParams.get("key") !== env.ADMIN_KEY) {
+        return Response.json({ error: "unauthorized" }, { status: 401 })
+      }
       await buildReliabilityCache(env)
       const { results } = await env.DB.prepare("SELECT * FROM reliability_cache").all()
       return Response.json({ ok: true, issuers: results ?? [] }, { headers: { "Access-Control-Allow-Origin": "*" } })
