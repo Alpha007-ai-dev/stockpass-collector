@@ -1,6 +1,7 @@
 export interface Env { DB: D1Database; RPC_URL?: string; ALPACA_KEY?: string; ALPACA_SECRET?: string; FINNHUB_KEY?: string; ADMIN_KEY?: string }
 
 const USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+const SKR = "SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2Qy2NPGZhW3"
 const ULTRA = "https://lite-api.jup.ag/ultra/v1/order"
 const SEARCH = "https://lite-api.jup.ag/tokens/v2/search?query="
 const RPC = "https://solana-rpc.publicnode.com"
@@ -234,6 +235,8 @@ export default {
       const { results: tokenRows } = await env.DB.prepare("SELECT ticker, symbol, issuer, mint, decimals FROM tokens").all()
       const byMint = new Map((tokenRows as any[]).map((t) => [t.mint, t]))
       const out: any[] = []
+      let usdc = 0
+      let skr = 0
 
       for (const programId of ["TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb", "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"]) {
         const res = await fetch(env.RPC_URL, {
@@ -248,15 +251,17 @@ export default {
         if (json.error) return Response.json({ error: json.error.message }, { status: 502 })
         for (const acc of json.result?.value ?? []) {
           const info = acc.account?.data?.parsed?.info
-          const token = byMint.get(info?.mint)
-          if (!token) continue
           const raw = Number(info?.tokenAmount?.amount ?? 0)
           if (raw === 0) continue
+          if (info?.mint === USDC) { usdc = raw / 1e6; continue }
+          if (info?.mint === SKR) { skr = raw / 1e6; continue }
+          const token = byMint.get(info?.mint)
+          if (!token) continue
           out.push({ ...token, walletAmount: raw / 10 ** token.decimals })
         }
       }
 
-      return Response.json(out, { headers: { "Access-Control-Allow-Origin": "*" } })
+      return Response.json({ holdings: out, usdc, skr }, { headers: { "Access-Control-Allow-Origin": "*" } })
     }
 
     if (url.pathname === "/underlying") {
