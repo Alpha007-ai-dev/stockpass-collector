@@ -489,12 +489,30 @@ export default {
       const t = url.searchParams.get("ticker")
       const hours = Math.min(Number(url.searchParams.get("hours") ?? 24), 24 * 14)
       if (!t) return Response.json({ error: "ticker required" }, { status: 400 })
-      const since = Math.floor(Date.now() / 1000) - hours * 3600
+
+      const key = `series:${t}:${hours}`
+      const nowS = Math.floor(Date.now() / 1000)
+      const cached = await env.DB.prepare("SELECT body, updated_at FROM response_cache WHERE key = ?").bind(key).first()
+      if (cached && nowS - Number((cached as any).updated_at) < 300) {
+        return new Response(String((cached as any).body), {
+          headers: { "Content-Type": "application/json", "Cache-Control": "max-age=120", "Access-Control-Allow-Origin": "*", "X-Cache": "hit" },
+        })
+      }
+
+      const since = nowS - hours * 3600
       const { results } = await env.DB.prepare(
         `SELECT ts, symbol, issuer, entry_bps, exit_bps, buy_px, quotable, market_state
          FROM measurements WHERE ticker = ? AND ts > ? ORDER BY ts`,
       ).bind(t, since).all()
-      return Response.json(results, { headers: { "Cache-Control": "max-age=120", "Access-Control-Allow-Origin": "*" } })
+
+      const body = JSON.stringify(results)
+      await env.DB.prepare(
+        "INSERT INTO response_cache (key, body, updated_at) VALUES (?,?,?) ON CONFLICT(key) DO UPDATE SET body=excluded.body, updated_at=excluded.updated_at"
+      ).bind(key, body, nowS).run()
+
+      return new Response(body, {
+        headers: { "Content-Type": "application/json", "Cache-Control": "max-age=120", "Access-Control-Allow-Origin": "*", "X-Cache": "miss" },
+      })
     }
 
     if (url.pathname === "/logo") {
