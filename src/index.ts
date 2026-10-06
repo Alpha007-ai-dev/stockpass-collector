@@ -467,14 +467,28 @@ export default {
     }
 
     if (url.pathname === "/collateral") {
+      // Same pattern as /stats: one row in response_cache, so most calls cost a single D1 read
+      // and never touch the Kamino API.
+      const TTL = 600
+      const nowTs = Math.floor(Date.now() / 1000)
+      const hit: any = await env.DB.prepare("SELECT body, updated_at FROM response_cache WHERE key = ?").bind("collateral").first()
+      const respond = (body: string, state: string, maxAge: number) =>
+        new Response(body, {
+          headers: { "Content-Type": "application/json", "Cache-Control": `max-age=${maxAge}`, "Access-Control-Allow-Origin": "*", "X-Cache": state },
+        })
+      if (hit && nowTs - Number(hit.updated_at) < TTL) return respond(String(hit.body), "hit", 300)
+
       const MARKETS = [
         { name: "Kamino xStocks Market", pubkey: "5wJeMrUYECGq41fxRESKALVcHnNX26TAWy4W98yULsua" },
         { name: "Kamino Sentora xStocks", pubkey: "8BNUWRSibVasaAmhYpBCFpGgMisGKfVAf9ho3Cmf6vjr" },
       ]
       const out: any[] = []
+      let complete = true
       for (const m of MARKETS) {
         try {
-          const rows: any = await fetch(`https://api.kamino.finance/kamino-market/${m.pubkey}/reserves/metrics`).then((r) => r.json())
+          const res = await fetch(`https://api.kamino.finance/kamino-market/${m.pubkey}/reserves/metrics`)
+          if (!res.ok) throw new Error(`kamino ${res.status}`)
+          const rows: any = await res.json()
           for (const r of rows ?? []) {
             const ltv = Number(r.maxLtv)
             if (!ltv) continue
@@ -488,9 +502,23 @@ export default {
               marketUsd: Math.round(Number(r.totalSupplyUsd ?? 0)),
             })
           }
-        } catch {}
+        } catch {
+          complete = false
+        }
       }
-      return Response.json(out, { headers: { "Cache-Control": "max-age=1800", "Access-Control-Allow-Origin": "*" } })
+
+      const body = JSON.stringify(out)
+      // Only a complete answer (both markets) is cached. A half list would hide one market for the
+      // whole TTL, and the two-market comparison is the point of this endpoint.
+      if (complete && out.length) {
+        await env.DB.prepare(
+          "INSERT INTO response_cache (key, body, updated_at) VALUES (?,?,?) ON CONFLICT(key) DO UPDATE SET body=excluded.body, updated_at=excluded.updated_at"
+        ).bind("collateral", body, nowTs).run()
+        return respond(body, "miss", 300)
+      }
+      // Kamino failed (or answered for one market only): prefer the last complete copy, however old.
+      if (hit) return respond(String(hit.body), "stale", 60)
+      return respond(body, "miss-uncached", 0)
     }
 
     if (url.pathname === "/series") {

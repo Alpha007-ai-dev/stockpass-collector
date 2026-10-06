@@ -51,7 +51,7 @@ Around 3,500–5,000 rows per day across 110+ tokens.
 | `GET /stats` | latest measurement per token, 30-day history grouped by market state, and the latest traditional reference per ticker |
 | `GET /series?ticker=SPY&hours=24` | time series of measurements for one stock |
 | `GET /tokens` | the token registry: ticker, symbol, issuer, mint, decimals, icon, name |
-| `GET /collateral` | live Kamino lending terms (max LTV, borrow APY, supply APY, market size) |
+| `GET /collateral` | Kamino lending terms (max LTV, borrow APY, supply APY, market size), cached for 10 minutes; if Kamino is down the last complete copy is served |
 | `GET /holdings?owner=<address>` | tokenized-stock holdings and USDC balance for a wallet |
 | `GET /logo?symbol=SPYx` | proxies the issuer's token logo (some issuers serve SVG that mobile cannot fetch directly) |
 | `GET /run` | triggers one measurement round manually |
