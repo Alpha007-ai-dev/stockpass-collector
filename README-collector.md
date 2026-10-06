@@ -52,6 +52,7 @@ Around 3,500–5,000 rows per day across 110+ tokens.
 | `GET /series?ticker=SPY&hours=24` | time series of measurements for one stock |
 | `GET /tokens` | the token registry: ticker, symbol, issuer, mint, decimals, icon, name |
 | `GET /collateral` | Kamino lending terms (max LTV, borrow APY, supply APY, market size), cached for 10 minutes; if Kamino is down the last complete copy is served |
+| `GET /explain-anomaly?symbol=SPYx` | `{ anomaly: false, reason }` while the latest entry cost is inside the token's observed range (same market state, last 14 days, 3 bps tolerance). Otherwise the evidence (current cost, typical range, observations, market state, availability, next earnings) plus a short factual note written by Claude. Cached for 15 minutes; Claude is only called when there is an anomaly |
 | `GET /holdings?owner=<address>` | tokenized-stock holdings and USDC balance for a wallet |
 | `GET /logo?symbol=SPYx` | proxies the issuer's token logo (some issuers serve SVG that mobile cannot fetch directly) |
 | `GET /run` | triggers one measurement round manually |
@@ -88,9 +89,12 @@ npx wrangler d1 execute stockpass --remote --file=reference.sql
 npx wrangler secret put RPC_URL           # a Solana RPC endpoint (multiplier + holdings)
 npx wrangler secret put ALPACA_KEY        # traditional reference feed, key id
 npx wrangler secret put ALPACA_SECRET     # traditional reference feed, secret
+npx wrangler secret put ANTHROPIC_API_KEY # /explain-anomaly (optional)
 ```
 
 The Worker runs without the Alpaca keys — it simply skips the traditional reference and the app hides that section.
+
+Without `ANTHROPIC_API_KEY`, `/explain-anomaly` still returns the evidence with `explanation_status: "unavailable"`, so the cost data is never blocked by the explanation.
 
 ```bash
 npx wrangler deploy
@@ -109,6 +113,8 @@ The cron trigger (`*/5 * * * *`) starts collecting immediately.
 **Negative costs are real but not exploitable.** Some tokens occasionally quote a round trip below zero, because Jupiter finds different routes in each direction. The app displays these as `~0 bps` rather than implying a profit.
 
 **Stale references are excluded, not shown.** Outside market hours the traditional reference is a leftover quote. The Worker marks it stale when it is older than 15 minutes or the bid-ask spread exceeds 50 bps, and the app then shows "market closed" rather than a fake premium.
+
+**The model describes, it does not diagnose.** `/explain-anomaly` computes the evidence from the measurements first. Claude never sees the database and only phrases what the evidence shows. Its answer is rejected if it names a cause, makes a prediction or uses a number that is not in the evidence; the app then shows that the explanation is unavailable instead of a guess. A fixed sentence stating that the cause cannot be determined is added by the Worker, not by the model.
 
 ---
 
