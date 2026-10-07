@@ -1,4 +1,5 @@
 import { handleExplainAnomaly } from "./anomaly"
+import { marketStateAt } from "./market-calendar"
 
 export interface Env { DB: D1Database; RPC_URL?: string; ALPACA_KEY?: string; ALPACA_SECRET?: string; FINNHUB_KEY?: string; ADMIN_KEY?: string; ANTHROPIC_API_KEY?: string }
 
@@ -22,23 +23,7 @@ type Token = { ticker: string; symbol: string; issuer: string; mint: string; dec
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
-function nthSunday(y: number, m: number, n: number) {
-  const first = new Date(Date.UTC(y, m, 1)).getUTCDay()
-  return 1 + ((7 - first) % 7) + (n - 1) * 7
-}
-
-function marketState(now: Date): string {
-  const y = now.getUTCFullYear()
-  const dst = now.getTime() >= Date.UTC(y, 2, nthSunday(y, 2, 2), 7) && now.getTime() < Date.UTC(y, 10, nthSunday(y, 10, 1), 6)
-  const ny = new Date(now.getTime() + (dst ? -4 : -5) * 3600000)
-  const dow = ny.getUTCDay()
-  const mins = ny.getUTCHours() * 60 + ny.getUTCMinutes()
-  if (dow === 0 || dow === 6) return "weekend"
-  if (mins >= 570 && mins < 960) return "open"
-  if (mins >= 240 && mins < 570) return "pre"
-  if (mins >= 960 && mins < 1200) return "after"
-  return "closed"
-}
+const marketState = (now: Date): string => marketStateAt(now)
 
 async function resolve(env: Env, tickers: string[]): Promise<Token[]> {
   const marks = tickers.map(() => "?").join(",")
