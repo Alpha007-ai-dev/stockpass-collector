@@ -52,6 +52,7 @@ Around 3,500–5,000 rows per day across 110+ tokens.
 | `GET /series?ticker=SPY&hours=24` | time series of measurements for one stock |
 | `GET /tokens` | the token registry: ticker, symbol, issuer, mint, decimals, icon, name |
 | `GET /collateral` | Kamino lending terms (max LTV, borrow APY, supply APY, market size), cached for 10 minutes; if Kamino is down the last complete copy is served |
+| `GET/POST/DELETE /alerts` | Cost alerts keyed by wallet address ("SPYx entry cost <= N bps", max 10 per wallet). `GET ?owner=` returns each alert with the current cost and whether it is triggered (fresh quote, at most 90 minutes old). Not authenticated, nothing sensitive stored; evaluated on read, no push |
 | `GET /swap/order`, `POST /swap/execute` | Relay for Jupiter Swap V2 (`api.jup.ag/swap/v2`); the API key stays in the Worker. Only stock <-> USDC/SOL/SKR pairs are relayed, params are whitelisted, nothing is cached. Returns 503 until `JUPITER_API_KEY` is set |
 | `GET /explain-anomaly?symbol=SPYx` | `{ anomaly: false, reason }` while the latest entry cost is inside the token's observed range (same market state, last 14 days, 3 bps tolerance). Otherwise the evidence (current cost, typical range, observations, market state, availability, next earnings) plus a short factual note written by Claude. Cached for 15 minutes; Claude is only called when there is an anomaly |
 | `GET /holdings?owner=<address>` | tokenized-stock holdings and USDC balance for a wallet |
@@ -82,6 +83,7 @@ npm install
 npx wrangler d1 create stockpass          # then put the id in wrangler.toml
 npx wrangler d1 execute stockpass --remote --file=schema.sql
 npx wrangler d1 execute stockpass --remote --file=reference.sql
+npx wrangler d1 execute stockpass --remote --file=alerts.sql
 ```
 
 ### Secrets

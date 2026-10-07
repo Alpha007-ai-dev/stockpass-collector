@@ -1,5 +1,6 @@
 import { handleExplainAnomaly } from "./anomaly"
 import { handleSwapOrder, handleSwapExecute } from "./swap-proxy"
+import { handleAlerts } from "./alerts"
 
 export interface Env { DB: D1Database; RPC_URL?: string; ALPACA_KEY?: string; ALPACA_SECRET?: string; FINNHUB_KEY?: string; ADMIN_KEY?: string; ANTHROPIC_API_KEY?: string; JUPITER_API_KEY?: string }
 
@@ -524,6 +525,7 @@ export default {
       return respond(body, "miss-uncached", 0)
     }
 
+    if (url.pathname === "/alerts") return handleAlerts(req, env)
     if (url.pathname === "/swap/order" && req.method === "GET") return handleSwapOrder(url, env)
     if (url.pathname === "/swap/execute" && req.method === "POST") return handleSwapExecute(req, env)
     if (url.pathname === "/swap/execute" && req.method === "OPTIONS") {
