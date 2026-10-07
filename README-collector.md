@@ -52,6 +52,7 @@ Around 3,500–5,000 rows per day across 110+ tokens.
 | `GET /series?ticker=SPY&hours=24` | time series of measurements for one stock |
 | `GET /tokens` | the token registry: ticker, symbol, issuer, mint, decimals, icon, name |
 | `GET /collateral` | Kamino lending terms (max LTV, borrow APY, supply APY, market size), cached for 10 minutes; if Kamino is down the last complete copy is served |
+| `GET /swap/order`, `POST /swap/execute` | Relay for Jupiter Swap V2 (`api.jup.ag/swap/v2`); the API key stays in the Worker. Only stock <-> USDC/SOL/SKR pairs are relayed, params are whitelisted, nothing is cached. Returns 503 until `JUPITER_API_KEY` is set |
 | `GET /explain-anomaly?symbol=SPYx` | `{ anomaly: false, reason }` while the latest entry cost is inside the token's observed range (same market state, last 14 days, 3 bps tolerance). Otherwise the evidence (current cost, typical range, observations, market state, availability, next earnings) plus a short factual note written by Claude. Cached for 15 minutes; Claude is only called when there is an anomaly |
 | `GET /holdings?owner=<address>` | tokenized-stock holdings and USDC balance for a wallet |
 | `GET /logo?symbol=SPYx` | proxies the issuer's token logo (some issuers serve SVG that mobile cannot fetch directly) |
@@ -90,6 +91,7 @@ npx wrangler secret put RPC_URL           # a Solana RPC endpoint (multiplier + 
 npx wrangler secret put ALPACA_KEY        # traditional reference feed, key id
 npx wrangler secret put ALPACA_SECRET     # traditional reference feed, secret
 npx wrangler secret put ANTHROPIC_API_KEY # /explain-anomaly (optional)
+npx wrangler secret put JUPITER_API_KEY # /swap/* (Swap V2 routes, optional)
 ```
 
 The Worker runs without the Alpaca keys — it simply skips the traditional reference and the app hides that section.

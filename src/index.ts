@@ -1,6 +1,7 @@
 import { handleExplainAnomaly } from "./anomaly"
+import { handleSwapOrder, handleSwapExecute } from "./swap-proxy"
 
-export interface Env { DB: D1Database; RPC_URL?: string; ALPACA_KEY?: string; ALPACA_SECRET?: string; FINNHUB_KEY?: string; ADMIN_KEY?: string; ANTHROPIC_API_KEY?: string }
+export interface Env { DB: D1Database; RPC_URL?: string; ALPACA_KEY?: string; ALPACA_SECRET?: string; FINNHUB_KEY?: string; ADMIN_KEY?: string; ANTHROPIC_API_KEY?: string; JUPITER_API_KEY?: string }
 
 const USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 const SKR = "SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2Qy2NPGZhW3"
@@ -523,6 +524,11 @@ export default {
       return respond(body, "miss-uncached", 0)
     }
 
+    if (url.pathname === "/swap/order" && req.method === "GET") return handleSwapOrder(url, env)
+    if (url.pathname === "/swap/execute" && req.method === "POST") return handleSwapExecute(req, env)
+    if (url.pathname === "/swap/execute" && req.method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "POST", "Access-Control-Allow-Headers": "Content-Type" } })
+    }
     if (url.pathname === "/explain-anomaly") {
       return handleExplainAnomaly(url, env)
     }
