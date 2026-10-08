@@ -35,16 +35,25 @@ async function resolve(env: Env, tickers: string[]): Promise<Token[]> {
   const have = new Map((cached.results as any[]).map((r) => [r.symbol, r as Token]))
   const lastSeen = new Map((cached.results as any[]).map((r) => [r.ticker as string, Number(r.updated_at)]))
   const out: Token[] = []
+  let refreshed = 0
 
   for (const t of tickers) {
     const cached = [have.get(`${t}x`), have.get(`${t}on`), have.get(`${t}bp`)].filter(Boolean) as Token[]
-    if (cached.length >= 2 && Date.now() / 1000 - (lastSeen.get(t) ?? 0) < 7 * 86400) { out.push(...cached); continue }
+    // Refresh at most one expired ticker per run: each refresh costs three searches and a run has a subrequest budget.
+    const expired = Date.now() / 1000 - (lastSeen.get(t) ?? 0) >= 7 * 86400
+    if (cached.length >= 2 && (!expired || refreshed >= 1)) { out.push(...cached); continue }
+    if (cached.length >= 2) refreshed++
     const before = out.length
     try {
-      const res = await fetch(SEARCH + t)
-      if (!res.ok) throw new Error(`jupiter search ${res.status}`)
-      const json: any = await res.json()
-      const verified = (json ?? []).filter((z: any) => z.isVerified)
+      // Searching the bare ticker ("GS") returns meme coins first and can bury the real tokens, so also search each issuer's symbol.
+      const found: any[] = []
+      for (const q of [t + "x", t + "on", t]) {
+        const res = await fetch(SEARCH + q)
+        if (!res.ok) throw new Error(`jupiter search ${res.status}`)
+        const part: any = await res.json()
+        if (Array.isArray(part)) found.push(...part)
+      }
+      const verified = found.filter((z: any) => z.isVerified)
 
       const candidates: { symbol: string; issuer: string; z: any }[] = []
       const xs = verified.find((q: any) => q.symbol === t + "x")
