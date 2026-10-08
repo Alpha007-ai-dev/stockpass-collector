@@ -51,7 +51,9 @@ async function resolve(env: Env, tickers: string[]): Promise<Token[]> {
     const cached = [have.get(`${t}x`), have.get(`${t}on`), have.get(`${t}bp`)].filter(Boolean) as Token[]
     if (cached.length >= 2 && Date.now() / 1000 - (lastSeen.get(t) ?? 0) < 7 * 86400) { out.push(...cached); continue }
     try {
-      const json: any = await fetch(SEARCH + t).then((r) => r.json())
+      const res = await fetch(SEARCH + t)
+      if (!res.ok) throw new Error(`jupiter search ${res.status}`)
+      const json: any = await res.json()
       const verified = (json ?? []).filter((z: any) => z.isVerified)
 
       const candidates: { symbol: string; issuer: string; z: any }[] = []
@@ -68,7 +70,9 @@ async function resolve(env: Env, tickers: string[]): Promise<Token[]> {
           .bind(row.symbol, row.ticker, row.issuer, row.mint, row.decimals, row.icon ?? null, row.name ?? null, Math.floor(Date.now() / 1000)).run()
         out.push(row)
       }
-    } catch {}
+    } catch (e: any) {
+      console.warn(`resolve ${t}: ${String(e?.message ?? e)}`)
+    }
   }
   return out
 }
@@ -79,7 +83,9 @@ async function mintInfo(tokens: Token[], rpc: string): Promise<Record<string, { 
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getMultipleAccounts", params: [tokens.map((t) => t.mint), { encoding: "jsonParsed" }] }),
   })
+  if (!res.ok) throw new Error(`rpc ${res.status}`)
   const json: any = await res.json()
+  if (json?.error || !Array.isArray(json?.result?.value)) throw new Error(`rpc: ${json?.error?.message ?? "no result"}`)
   const now = Date.now() / 1000
   const out: Record<string, { multiplier: number; supply: number }> = {}
   tokens.forEach((t, i) => {
@@ -93,8 +99,14 @@ async function mintInfo(tokens: Token[], rpc: string): Promise<Record<string, { 
   return out
 }
 
+class TransientError extends Error {}
+
+// A rate limit or upstream outage says nothing about the token, so it must not be recorded as
+// "quotable = 0". Callers skip the measurement on TransientError.
 async function orderOut(inputMint: string, outputMint: string, amount: string): Promise<string> {
-  const json: any = await fetch(`${ULTRA}?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}`).then((r) => r.json())
+  const res = await fetch(`${ULTRA}?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}`)
+  if (res.status === 429 || res.status >= 500) throw new TransientError(`jupiter ${res.status}`)
+  const json: any = await res.json().catch(() => null)
   if (!json?.outAmount) throw new Error(json?.error ?? "no quote")
   return String(json.outAmount)
 }
@@ -145,7 +157,14 @@ async function collect(env: Env) {
 
   const ts = Math.floor(Date.now() / 1000)
   const state = marketState(new Date())
-  const info = await mintInfo(tokens, env.RPC_URL ?? RPC)
+  let info: Record<string, { multiplier: number; supply: number }>
+  try {
+    info = await mintInfo(tokens, env.RPC_URL ?? RPC)
+  } catch (e: any) {
+    // Without the multiplier the per-share prices would be wrong; skip the round instead of storing them.
+    console.warn(`collect: mintInfo failed: ${String(e?.message ?? e)}`)
+    return 0
+  }
   const rows: any[] = []
 
   for (const t of tokens) {
@@ -162,10 +181,18 @@ async function collect(env: Env) {
       const mid = (buy + sell) / 2
       rows.push([ts, t.ticker, t.symbol, t.issuer, SIZE_USD, state, 1, buy, sell,
         Math.round((buy / mid - 1) * 10000), Math.round((1 - sell / mid) * 10000), m, supply])
-    } catch {
+    } catch (e) {
+      if (e instanceof TransientError) { console.warn(`collect ${t.symbol}: ${e.message}`); continue }
       rows.push([ts, t.ticker, t.symbol, t.issuer, SIZE_USD, state, 0, null, null, null, null, m, supply])
     }
   }
+
+  // Store the main series first: the size tests below take several more seconds and a timeout
+  // there must not lose the whole slice.
+  const stmt = env.DB.prepare(
+    "INSERT INTO measurements (ts,ticker,symbol,issuer,size_usd,market_state,quotable,buy_px,sell_px,entry_bps,exit_bps,multiplier,supply) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+  )
+  if (rows.length) await env.DB.batch(rows.map((r) => stmt.bind(...r)))
   // One token per run also gets measured at other sizes, so we can show how
   // execution cost scales. Kept in a separate table so the main series stays clean.
   const SIZES = [100, 10000]
@@ -185,17 +212,12 @@ async function collect(env: Env) {
         const mid = (buy + sell) / 2
         sizeRows.push([ts, pick.ticker, pick.symbol, pick.issuer, size, state, 1,
           Math.round((buy / mid - 1) * 10000), Math.round((1 - sell / mid) * 10000)])
-      } catch {
+      } catch (e) {
+        if (e instanceof TransientError) { console.warn(`size test ${pick.symbol}: ${e.message}`); continue }
         sizeRows.push([ts, pick.ticker, pick.symbol, pick.issuer, size, state, 0, null, null])
       }
     }
   }
-
-
-  const stmt = env.DB.prepare(
-    "INSERT INTO measurements (ts,ticker,symbol,issuer,size_usd,market_state,quotable,buy_px,sell_px,entry_bps,exit_bps,multiplier,supply) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-  )
-  await env.DB.batch(rows.map((r) => stmt.bind(...r)))
 
   if (sizeRows.length) {
     const sizeStmt = env.DB.prepare(
@@ -529,8 +551,9 @@ export default {
 
     if (url.pathname === "/series") {
       const t = url.searchParams.get("ticker")
-      const hours = Math.min(Number(url.searchParams.get("hours") ?? 24), 24 * 14)
-      if (!t) return Response.json({ error: "ticker required" }, { status: 400 })
+      if (!t || !/^[A-Za-z0-9]{1,16}$/.test(t)) return Response.json({ error: "ticker required" }, { status: 400 })
+      const h = Number(url.searchParams.get("hours") ?? 24)
+      const hours = Number.isFinite(h) ? Math.min(Math.max(Math.floor(h), 1), 24 * 14) : 24
 
       const key = `series:${t}:${hours}`
       const nowS = Math.floor(Date.now() / 1000)
