@@ -14,6 +14,7 @@ export const WINDOW_DAYS = 14 // history used for the "typical" range
 export const MIN_OBSERVATIONS = 10 // fewer observations in the same market state: no verdict
 export const ANOMALY_MARGIN_BPS = 3 // outside the range by more than this; same tolerance as the Home insight rule
 export const CACHE_TTL_S = 900 // 15 minutes
+export const FAIL_CACHE_TTL_S = 120 // a rejected or failed Claude answer is not retried for 2 minutes
 export const MAX_AGE_S = 3 * 3600 // a measurement older than this is not "current"
 export const CAUSE_NOTE = "StockPass does not have enough historical data to determine the cause of this change."
 
@@ -158,10 +159,16 @@ export async function handleExplainAnomaly(url: URL, env: AnomalyEnv, doFetch: t
   const token: any = await env.DB.prepare("SELECT ticker FROM tokens WHERE symbol = ?").bind(symbol).first()
   if (!token) return respond({ error: "unknown symbol" }, 404, "none", "no-store")
 
-  const store = (body: string) =>
+  // A recent failure (Claude error or an answer that failed validation) is served as is, so a burst of requests
+  // cannot turn into a burst of Claude calls. A missing key is never cached: setting it takes effect at once.
+  const failKey = `explain-fail:${symbol}`
+  const failHit: any = await env.DB.prepare("SELECT body, updated_at FROM response_cache WHERE key = ?").bind(failKey).first()
+  if (failHit && nowTs - Number(failHit.updated_at) < FAIL_CACHE_TTL_S) return respond(String(failHit.body), 200, "hit", "max-age=60")
+
+  const store = (body: string, k = key) =>
     env.DB.prepare(
       "INSERT INTO response_cache (key, body, updated_at) VALUES (?,?,?) ON CONFLICT(key) DO UPDATE SET body=excluded.body, updated_at=excluded.updated_at",
-    ).bind(key, body, nowTs).run()
+    ).bind(k, body, nowTs).run()
   // No anomaly: Claude is not called. The verdict is cached like any other result.
   const none = async (reason: string) => {
     const body = JSON.stringify({ anomaly: false, symbol, reason })
@@ -208,10 +215,14 @@ export async function handleExplainAnomaly(url: URL, env: AnomalyEnv, doFetch: t
     explanation,
     explanation_status: explanation ? "ok" : "unavailable",
   })
-  // Failures are never cached: a missing key or a rejected answer can be fixed and retried at once.
   if (explanation) {
     await store(body)
     return respond(body, 200, "miss", "max-age=120")
+  }
+  // Key configured but Claude failed or was rejected: remember that briefly. No key: nothing to remember.
+  if (env.ANTHROPIC_API_KEY) {
+    await store(body, failKey)
+    return respond(body, 200, "miss", "max-age=60")
   }
   return respond(body, 200, "miss", "no-store")
 }
