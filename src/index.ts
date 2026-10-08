@@ -399,10 +399,10 @@ export default {
          JOIN (
            SELECT symbol, MAX(ts) AS ts
            FROM measurements
-           WHERE symbol IN (${marks}) AND ts <= ? AND quotable = 1 AND buy_px IS NOT NULL
+           WHERE symbol IN (${marks}) AND ts <= ? AND ts >= ? AND quotable = 1 AND buy_px IS NOT NULL
            GROUP BY symbol
          ) AS pick ON pick.symbol = m.symbol AND pick.ts = m.ts`
-      ).bind(...symbols, cutoff).all()
+      ).bind(...symbols, cutoff, cutoff - 6 * 3600).all()
 
       const then: Record<string, { px: number; ts: number }> = {}
       for (const r of (results as any[]) ?? []) {
@@ -629,7 +629,9 @@ export default {
 
       const { results: history } = await env.DB.prepare(
         `SELECT symbol, issuer, ticker, market_state, COUNT(*) AS samples,
-                AVG(entry_bps) AS avg_entry, MIN(entry_bps) AS min_entry, MAX(entry_bps) AS max_entry,
+                AVG(CASE WHEN quotable=1 AND entry_bps < 200 THEN entry_bps END) AS avg_entry,
+                MIN(CASE WHEN quotable=1 AND entry_bps < 200 THEN entry_bps END) AS min_entry,
+                MAX(CASE WHEN quotable=1 AND entry_bps < 200 THEN entry_bps END) AS max_entry,
                 AVG(quotable) AS availability
          FROM measurements WHERE ts > ?
          GROUP BY symbol, market_state ORDER BY ticker, symbol`,

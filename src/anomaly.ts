@@ -179,7 +179,8 @@ export async function handleExplainAnomaly(url: URL, env: AnomalyEnv, doFetch: t
   const latest: any = await env.DB.prepare(LATEST_SQL).bind(token.ticker, symbol).first()
   if (!latest) return none("no_data")
   if (nowTs - Number(latest.ts) > MAX_AGE_S) return none("stale_measurement")
-  if (Number(latest.quotable) !== 1 || latest.entry_bps == null) return none("no_quote")
+  // 200 bps or more is "no real market" everywhere else in the product, so it is not an anomaly to explain.
+  if (Number(latest.quotable) !== 1 || latest.entry_bps == null || Number(latest.entry_bps) >= 200) return none("no_quote")
 
   const r: any = await env.DB.prepare(RANGE_SQL)
     .bind(token.ticker, symbol, latest.market_state, nowTs - WINDOW_DAYS * 86400, latest.ts)
