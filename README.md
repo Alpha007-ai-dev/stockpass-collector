@@ -50,6 +50,8 @@ Around 3,500–5,000 rows per day across 110+ tokens.
 |---|---|
 | `GET /stats` | latest measurement per token, 30-day history grouped by market state, and the latest traditional reference per ticker |
 | `GET /series?ticker=SPY&hours=24` | time series of measurements for one stock |
+| `GET /size-curve?symbol=TSLAon&state=open` | average measured cost at $100, $1,000 and $10,000 over the last 14 days, per market state; sizes with fewer than 3 observations are left out |
+| `GET /multiplier-changes` | tokens whose share multiplier changed in the last 14 days or is scheduled to change (read from the mint's scaled-amount configuration, cached 10 min) |
 | `GET /tokens` | the token registry: ticker, symbol, issuer, mint, decimals, icon, name |
 | `GET /collateral` | Kamino lending terms (max LTV, borrow APY, supply APY, market size), cached for 10 minutes; if Kamino is down the last complete copy is served |
 | `GET/POST/DELETE /alerts` | Cost alerts keyed by wallet address ("SPYx entry cost <= N bps", max 10 per wallet). `GET ?owner=` returns each alert with the current cost and whether it is triggered (fresh quote, at most 90 minutes old). Not authenticated, nothing sensitive stored; evaluated on read, no push |

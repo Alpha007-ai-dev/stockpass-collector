@@ -1,6 +1,7 @@
 import { handleExplainAnomaly } from "./anomaly"
 import { handleSwapOrder, handleSwapExecute } from "./swap-proxy"
 import { handleAlerts } from "./alerts"
+import { handleMultiplierChanges, handleSizeCurve } from "./token-insights"
 import { isLimited, type Limiter } from "./limit"
 import { marketStateAt } from "./market-calendar"
 
@@ -555,6 +556,9 @@ export default {
     if (url.pathname === "/explain-anomaly") {
       return handleExplainAnomaly(url, env)
     }
+
+    if (url.pathname === "/size-curve") return handleSizeCurve(url, env)
+    if (url.pathname === "/multiplier-changes") return handleMultiplierChanges(env)
 
     if (url.pathname === "/series") {
       const t = url.searchParams.get("ticker")
