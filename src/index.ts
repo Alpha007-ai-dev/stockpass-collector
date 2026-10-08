@@ -39,6 +39,7 @@ async function resolve(env: Env, tickers: string[]): Promise<Token[]> {
   for (const t of tickers) {
     const cached = [have.get(`${t}x`), have.get(`${t}on`), have.get(`${t}bp`)].filter(Boolean) as Token[]
     if (cached.length >= 2 && Date.now() / 1000 - (lastSeen.get(t) ?? 0) < 7 * 86400) { out.push(...cached); continue }
+    const before = out.length
     try {
       const res = await fetch(SEARCH + t)
       if (!res.ok) throw new Error(`jupiter search ${res.status}`)
@@ -61,6 +62,11 @@ async function resolve(env: Env, tickers: string[]): Promise<Token[]> {
       }
     } catch (e: any) {
       console.warn(`resolve ${t}: ${String(e?.message ?? e)}`)
+    }
+    // A failed or empty refresh must not drop a ticker: mint addresses do not change, so keep measuring the cached tokens.
+    if (out.length === before && cached.length > 0) {
+      console.warn(`resolve ${t}: refresh returned nothing, using ${cached.length} cached token(s)`)
+      out.push(...cached)
     }
   }
   return out
