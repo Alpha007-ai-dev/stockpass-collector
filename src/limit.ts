@@ -1,5 +1,5 @@
 // Optional per-IP rate limit. It uses a Cloudflare Rate Limiting binding named RATE_LIMITER when one is
-// configured (see README-collector.md); without the binding nothing is limited and nothing breaks.
+// configured (see README.md); without the binding nothing is limited and nothing breaks.
 
 export interface Limiter {
   limit(options: { key: string }): Promise<{ success: boolean }>
