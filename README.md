@@ -57,10 +57,20 @@ Around 3,500–5,000 rows per day across 110+ tokens.
 | `GET /explain-anomaly?symbol=SPYx` | `{ anomaly: false, reason }` while the latest entry cost is inside the token's observed range (same market state, last 14 days, 3 bps tolerance). Otherwise the evidence (current cost, typical range, observations, market state, availability, next earnings) plus a short factual note written by Claude. Cached for 15 minutes; Claude is only called when there is an anomaly |
 | `GET /holdings?owner=<address>` | tokenized-stock holdings and USDC balance for a wallet |
 | `GET /logo?symbol=SPYx` | proxies the issuer's token logo (some issuers serve SVG that mobile cannot fetch directly) |
+| `GET /prices?symbols=SPYx,SPYon&hours=24` | price history for the given symbols, used for portfolio sparklines |
+| `GET /reliability?symbol=SPYx` | how often a token had an executable quote, by market state |
+| `GET /underlying?ticker=SPY` | company profile and upcoming events for a stock |
+
+Admin endpoints need `?key=<ADMIN_KEY>` and return 401 without it:
+
+| Endpoint | Does |
+|---|---|
 | `GET /run` | triggers one measurement round manually |
 | `GET /resolve?from=0` | re-resolves the token registry from Jupiter for a slice of tickers |
+| `GET /underlying-sync?from=0` | refreshes company profiles and events from Finnhub |
+| `GET /rebuild-cache` | rebuilds the reliability cache |
 
-All endpoints are CORS-open and require no client key.
+The public endpoints are CORS-open and require no client key.
 
 ---
 
@@ -70,7 +80,7 @@ Tokens are discovered from Jupiter's verified token list, not hardcoded:
 
 - **xStocks** — symbol ends in `x` (e.g. `SPYx`)
 - **Ondo** — symbol ends in `on` (e.g. `SPYon`)
-- **Backpack Securities** — symbol is the plain ticker, identified by issuer metadata in the token name
+- **Backpack Securities** — symbol is the ticker plus `bp` (e.g. `HOODbp`), identified by issuer metadata in the token name
 
 Adding a fourth issuer means adding one detection rule. The app needs no changes.
 
@@ -80,7 +90,7 @@ Adding a fourth issuer means adding one detection rule. The app needs no changes
 
 ```bash
 npm install
-npx wrangler d1 create stockpass          # then put the id in wrangler.toml
+npx wrangler d1 create stockpass          # then put the id in wrangler.jsonc
 npx wrangler d1 execute stockpass --remote --file=schema.sql
 npx wrangler d1 execute stockpass --remote --file=reference.sql
 npx wrangler d1 execute stockpass --remote --file=alerts.sql
@@ -92,6 +102,8 @@ npx wrangler d1 execute stockpass --remote --file=alerts.sql
 npx wrangler secret put RPC_URL           # a Solana RPC endpoint (multiplier + holdings)
 npx wrangler secret put ALPACA_KEY        # traditional reference feed, key id
 npx wrangler secret put ALPACA_SECRET     # traditional reference feed, secret
+npx wrangler secret put FINNHUB_KEY       # /underlying-sync (company profiles and events)
+npx wrangler secret put ADMIN_KEY         # required for /run, /resolve, /underlying-sync, /rebuild-cache
 npx wrangler secret put ANTHROPIC_API_KEY # /explain-anomaly (optional)
 npx wrangler secret put JUPITER_API_KEY # /swap/* (Swap V2 routes, optional)
 ```
@@ -118,7 +130,7 @@ The cron trigger (`*/5 * * * *`) starts collecting immediately.
 
 **Round trip, not spread.** We buy and immediately sell, then split the loss evenly. This is what a user actually experiences, and it includes routing, price impact and fees — not a theoretical mid-price spread.
 
-**Rotation over frequency.** Measuring 110+ tokens every 5 minutes would exceed the Worker's subrequest budget. Instead a slice is measured each run, so each token is sampled roughly every 45 minutes. Execution costs move slowly (1–4 bps per hour in our data), so this is enough for historical context; the app fetches a live quote at the moment of trading.
+**Rotation over frequency.** Measuring 120+ tokens every 5 minutes would exceed the Worker's subrequest budget. Instead a slice is measured each run, so each token is sampled roughly every 50 minutes. Execution costs move slowly (1–4 bps per hour in our data), so this is enough for historical context; the app fetches a live quote at the moment of trading.
 
 **Negative costs are real but not exploitable.** Some tokens occasionally quote a round trip below zero, because Jupiter finds different routes in each direction. The app displays these as `~0 bps` rather than implying a profit.
 

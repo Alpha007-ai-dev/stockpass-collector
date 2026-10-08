@@ -221,6 +221,11 @@ export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     const url = new URL(req.url)
 
+    // Admin endpoints: they trigger work against Jupiter, D1 and Finnhub, so they need the admin key.
+    if ((url.pathname === "/resolve" || url.pathname === "/run" || url.pathname === "/underlying-sync") && (!env.ADMIN_KEY || url.searchParams.get("key") !== env.ADMIN_KEY)) {
+      return Response.json({ error: "unauthorized" }, { status: 401 })
+    }
+
     if (url.pathname === "/resolve") {
       const from = Number(url.searchParams.get("from") ?? 0)
       const slice = TICKERS.slice(from, from + 12)
