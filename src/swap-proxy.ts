@@ -34,8 +34,11 @@ async function isStock(db: D1Database, mint: string): Promise<boolean> {
   return !!row
 }
 
+const NULL_BODY = new Set([101, 204, 205, 304])
+const MAX_BODY_CHARS = 8000
+
 async function relay(res: Response): Promise<Response> {
-  const text = await res.text()
+  const text = NULL_BODY.has(res.status) ? null : await res.text()
   // Pass Jupiter's status and body through so the app can show the real reason.
   return new Response(text, {
     status: res.status,
@@ -57,8 +60,15 @@ export async function handleSwapOrder(url: URL, env: SwapEnv, doFetch: typeof fe
   if (slippage && !(/^\d{1,4}$/.test(slippage) && Number(slippage) <= MAX_SLIPPAGE_BPS)) return json({ error: "bad slippage" }, 400)
   if (inputMint === outputMint) return json({ error: "same mint" }, 400)
 
-  const stockIn = !BASES.has(inputMint) && (await isStock(env.DB, inputMint))
-  const stockOut = !BASES.has(outputMint) && (await isStock(env.DB, outputMint))
+  let stockIn = false
+  let stockOut = false
+  try {
+    stockIn = !BASES.has(inputMint) && (await isStock(env.DB, inputMint))
+    stockOut = !BASES.has(outputMint) && (await isStock(env.DB, outputMint))
+  } catch (e: any) {
+    console.warn(`swap-order: db ${String(e?.message ?? e)}`)
+    return json({ error: "internal" }, 500)
+  }
   const baseOther = stockIn ? BASES.has(outputMint) : stockOut ? BASES.has(inputMint) : false
   if (!baseOther) return json({ error: "pair not allowed" }, 403)
 
@@ -70,7 +80,7 @@ export async function handleSwapOrder(url: URL, env: SwapEnv, doFetch: typeof fe
       headers: { "x-api-key": env.JUPITER_API_KEY },
       signal: AbortSignal.timeout(8000),
     })
-    return relay(res)
+    return await relay(res)
   } catch (e: any) {
     console.warn(`swap-order: ${String(e?.message ?? e)}`)
     return json({ error: "upstream unavailable" }, 502)
@@ -81,7 +91,10 @@ export async function handleSwapExecute(req: Request, env: SwapEnv, doFetch: typ
   if (!env.JUPITER_API_KEY) return json({ error: "swap v2 not configured" }, 503)
   let body: any
   try {
-    body = await req.json()
+    if (Number(req.headers.get("content-length") ?? 0) > MAX_BODY_CHARS) return json({ error: "too large" }, 413)
+    const raw = await req.text()
+    if (raw.length > MAX_BODY_CHARS) return json({ error: "too large" }, 413)
+    body = JSON.parse(raw)
   } catch {
     return json({ error: "bad json" }, 400)
   }
@@ -96,7 +109,7 @@ export async function handleSwapExecute(req: Request, env: SwapEnv, doFetch: typ
       body: JSON.stringify({ signedTransaction, requestId }),
       signal: AbortSignal.timeout(30000),
     })
-    return relay(res)
+    return await relay(res)
   } catch (e: any) {
     console.warn(`swap-execute: ${String(e?.message ?? e)}`)
     return json({ error: "upstream unavailable" }, 502)

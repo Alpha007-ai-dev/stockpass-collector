@@ -1,8 +1,9 @@
 import { handleExplainAnomaly } from "./anomaly"
 import { handleSwapOrder, handleSwapExecute } from "./swap-proxy"
 import { handleAlerts } from "./alerts"
+import { isLimited, type Limiter } from "./limit"
 
-export interface Env { DB: D1Database; RPC_URL?: string; ALPACA_KEY?: string; ALPACA_SECRET?: string; FINNHUB_KEY?: string; ADMIN_KEY?: string; ANTHROPIC_API_KEY?: string; JUPITER_API_KEY?: string }
+export interface Env { DB: D1Database; RPC_URL?: string; ALPACA_KEY?: string; ALPACA_SECRET?: string; FINNHUB_KEY?: string; ADMIN_KEY?: string; ANTHROPIC_API_KEY?: string; JUPITER_API_KEY?: string; RATE_LIMITER?: Limiter }
 
 const USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 const SKR = "SKRbvo6Gf7GondiT3BbTfuRDPqLWei4j2Qy2NPGZhW3"
@@ -525,11 +526,19 @@ export default {
       return respond(body, "miss-uncached", 0)
     }
 
+    if (url.pathname === "/alerts" || url.pathname.startsWith("/swap/")) {
+      if (req.method !== "OPTIONS" && (await isLimited(env.RATE_LIMITER, req, url.pathname.startsWith("/swap/") ? "swap" : "alerts"))) {
+        return new Response(JSON.stringify({ error: "rate limited" }), { status: 429, headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } })
+      }
+    }
     if (url.pathname === "/alerts") return handleAlerts(req, env)
     if (url.pathname === "/swap/order" && req.method === "GET") return handleSwapOrder(url, env)
     if (url.pathname === "/swap/execute" && req.method === "POST") return handleSwapExecute(req, env)
-    if (url.pathname === "/swap/execute" && req.method === "OPTIONS") {
-      return new Response(null, { status: 204, headers: { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "POST", "Access-Control-Allow-Headers": "Content-Type" } })
+    if (url.pathname.startsWith("/swap/")) {
+      if (req.method === "OPTIONS") {
+        return new Response(null, { status: 204, headers: { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, POST", "Access-Control-Allow-Headers": "Content-Type" } })
+      }
+      return new Response(JSON.stringify({ error: "not found or method not allowed" }), { status: 405, headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } })
     }
     if (url.pathname === "/explain-anomaly") {
       return handleExplainAnomaly(url, env)

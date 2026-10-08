@@ -32,18 +32,20 @@ function fakeDb() {
 				bind: (...a: any[]) => ((args = a), q),
 				first: async () => {
 					if (sql.includes("FROM tokens")) return args[0] === "SPYx" ? { ticker: "SPY" } : null;
-					if (sql.includes("COUNT(*)")) {
-						const mine = [...alerts.values()].filter((a) => a.owner === args[1]);
-						return { n: mine.length, has: mine.filter((a) => a.symbol === args[0]).length };
-					}
 					if (sql.includes("FROM measurements")) return { ts: Math.floor(Date.now() / 1000), entry_bps: 4, quotable: 1 };
 					return null;
 				},
 				all: async () => ({ results: [...alerts.values()].filter((a) => a.owner === args[0]) }),
 				run: async () => {
-					if (sql.startsWith("INSERT")) alerts.set(args[0] + args[1], { owner: args[0], symbol: args[1], ticker: args[2], threshold_bps: args[3] });
+					if (sql.startsWith("INSERT")) {
+						const [owner, symbol, ticker, threshold_bps, , max] = args;
+						const mine = [...alerts.values()].filter((x) => x.owner === owner);
+						if (mine.length >= max && !mine.some((x) => x.symbol === symbol)) return { meta: { changes: 0 } };
+						alerts.set(owner + symbol, { owner, symbol, ticker, threshold_bps });
+						return { meta: { changes: 1 } };
+					}
 					if (sql.startsWith("DELETE")) alerts.delete(args[0] + args[1]);
-					return {};
+					return { meta: { changes: 1 } };
 				},
 			};
 			return q;
@@ -82,5 +84,20 @@ describe("alerts handler", () => {
 		alerts.set("kx", { owner: OWNER, symbol: "SPYx" });
 		alerts.delete("k0");
 		expect((await call(db, "POST", "/alerts", { owner: OWNER, symbol: "SPYx", threshold_bps: 7 })).status).toBe(200);
+	});
+	it("answers a CORS preflight without throwing", async () => {
+		const { db } = fakeDb();
+		const r = await call(db, "OPTIONS", "/alerts");
+		expect(r.status).toBe(204);
+	});
+	it("only accepts a numeric threshold", async () => {
+		const { db } = fakeDb();
+		for (const bad of [null, "", [], true, "5"]) {
+			expect((await call(db, "POST", "/alerts", { owner: OWNER, symbol: "SPYx", threshold_bps: bad })).status).toBe(400);
+		}
+	});
+	it("returns 500 instead of throwing when the database fails", async () => {
+		const broken: any = { prepare: () => { throw new Error("no such table: alerts"); } };
+		expect((await call(broken, "GET", `/alerts?owner=${OWNER}`)).status).toBe(500);
 	});
 });

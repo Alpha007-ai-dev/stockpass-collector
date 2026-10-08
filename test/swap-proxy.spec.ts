@@ -58,4 +58,22 @@ describe("swap execute", () => {
 		expect((await post({ signedTransaction: "A".repeat(5000), requestId: "abc-12345678" })).status).toBe(400);
 		expect((await post({ signedTransaction: "AAEC", requestId: "abc-12345678" }, { DB: db([]) })).status).toBe(503);
 	});
+	it("rejects oversized bodies before parsing", async () => {
+		const r = await handleSwapExecute(
+			new Request("https://w/swap/execute", { method: "POST", body: JSON.stringify({ signedTransaction: "A".repeat(20000), requestId: "abc-12345678" }) }),
+			env,
+			upstream,
+		);
+		expect(r.status).toBe(413);
+	});
+	it("passes through an empty upstream status without throwing", async () => {
+		const empty = (async () => new Response(null, { status: 204 })) as unknown as typeof fetch;
+		const r = await handleSwapExecute(new Request("https://w/swap/execute", { method: "POST", body: JSON.stringify({ signedTransaction: "AAEC", requestId: "abc-12345678" }) }), env, empty);
+		expect(r.status).toBe(204);
+	});
+	it("reports an upstream failure while reading the body as 502", async () => {
+		const broken = (async () => ({ status: 200, text: async () => { throw new Error("aborted"); } })) as unknown as typeof fetch;
+		const r = await handleSwapExecute(new Request("https://w/swap/execute", { method: "POST", body: JSON.stringify({ signedTransaction: "AAEC", requestId: "abc-12345678" }) }), env, broken);
+		expect(r.status).toBe(502);
+	});
 });

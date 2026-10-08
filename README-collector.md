@@ -98,6 +98,12 @@ npx wrangler secret put JUPITER_API_KEY # /swap/* (Swap V2 routes, optional)
 
 The Worker runs without the Alpaca keys — it simply skips the traditional reference and the app hides that section.
 
+`/swap/*` and `/alerts` can be rate limited per IP. Add a Cloudflare Rate Limiting binding named `RATE_LIMITER` to `wrangler.jsonc` and the Worker uses it; without the binding nothing is limited:
+
+```jsonc
+"ratelimits": [{ "name": "RATE_LIMITER", "namespace_id": "1001", "simple": { "limit": 60, "period": 60 } }]
+```
+
 Without `ANTHROPIC_API_KEY`, `/explain-anomaly` still returns the evidence with `explanation_status: "unavailable"`, so the cost data is never blocked by the explanation.
 
 ```bash

@@ -52,7 +52,21 @@ function json(body: unknown, status = 200): Response {
 }
 
 export async function handleAlerts(req: Request, env: AlertsEnv): Promise<Response> {
-  if (req.method === "OPTIONS") return json(null, 204)
+  if (req.method === "OPTIONS") {
+    return new Response(null, {
+      status: 204,
+      headers: { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, POST, DELETE", "Access-Control-Allow-Headers": "Content-Type" },
+    })
+  }
+  try {
+    return await route(req, env)
+  } catch (e: any) {
+    console.warn(`alerts: ${String(e?.message ?? e)}`)
+    return json({ error: "internal" }, 500)
+  }
+}
+
+async function route(req: Request, env: AlertsEnv): Promise<Response> {
   const url = new URL(req.url)
 
   if (req.method === "GET") {
@@ -75,17 +89,21 @@ export async function handleAlerts(req: Request, env: AlertsEnv): Promise<Respon
     try { body = await req.json() } catch { return json({ error: "bad json" }, 400) }
     const owner = String(body?.owner ?? "")
     const symbol = String(body?.symbol ?? "")
-    const threshold = Number(body?.threshold_bps)
+    const threshold = typeof body?.threshold_bps === "number" ? body.threshold_bps : NaN
     if (!BASE58.test(owner)) return json({ error: "owner required" }, 400)
     if (!SYMBOL.test(symbol)) return json({ error: "symbol required" }, 400)
     if (!Number.isFinite(threshold) || threshold < MIN_THRESHOLD_BPS || threshold > MAX_THRESHOLD_BPS) return json({ error: "threshold_bps out of range" }, 400)
     const token: any = await env.DB.prepare("SELECT ticker FROM tokens WHERE symbol = ?").bind(symbol).first()
     if (!token) return json({ error: "unknown symbol" }, 404)
-    const existing: any = await env.DB.prepare("SELECT COUNT(*) AS n, SUM(symbol = ?) AS has FROM alerts WHERE owner = ?").bind(symbol, owner).first()
-    if (!Number(existing?.has ?? 0) && Number(existing?.n ?? 0) >= MAX_ALERTS_PER_OWNER) return json({ error: "too many alerts" }, 429)
-    await env.DB.prepare(
-      "INSERT INTO alerts (owner, symbol, ticker, threshold_bps, created_at) VALUES (?,?,?,?,?) ON CONFLICT(owner, symbol) DO UPDATE SET threshold_bps=excluded.threshold_bps, created_at=excluded.created_at",
-    ).bind(owner, symbol, token.ticker, threshold, Math.floor(Date.now() / 1000)).run()
+    // One atomic statement: insert or replace, but only while the wallet is under the cap (replacing an existing alert is always allowed).
+    const r: any = await env.DB.prepare(
+      `INSERT INTO alerts (owner, symbol, ticker, threshold_bps, created_at)
+       SELECT ?1, ?2, ?3, ?4, ?5
+       WHERE (SELECT COUNT(*) FROM alerts WHERE owner = ?1) < ?6
+          OR EXISTS (SELECT 1 FROM alerts WHERE owner = ?1 AND symbol = ?2)
+       ON CONFLICT(owner, symbol) DO UPDATE SET threshold_bps=excluded.threshold_bps, created_at=excluded.created_at`,
+    ).bind(owner, symbol, token.ticker, threshold, Math.floor(Date.now() / 1000), MAX_ALERTS_PER_OWNER).run()
+    if (Number(r?.meta?.changes ?? 0) === 0) return json({ error: "too many alerts" }, 429)
     return json({ ok: true })
   }
 
