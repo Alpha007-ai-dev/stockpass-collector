@@ -118,7 +118,13 @@ class TransientError extends Error {}
 // A rate limit or upstream outage says nothing about the token, so it must not be recorded as
 // "quotable = 0". Callers skip the measurement on TransientError.
 async function orderOut(inputMint: string, outputMint: string, amount: string): Promise<string> {
-  const res = await fetch(`${ULTRA}?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}`, { signal: AbortSignal.timeout(8000) })
+  let res: Response
+  try {
+    res = await fetch(`${ULTRA}?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}`, { signal: AbortSignal.timeout(8000) })
+  } catch (e: any) {
+    // A timeout or network failure says nothing about the token either.
+    throw new TransientError(`jupiter unreachable: ${String(e?.name ?? e)}`)
+  }
   if (res.status === 429 || res.status >= 500) throw new TransientError(`jupiter ${res.status}`)
   const json: any = await res.json().catch(() => null)
   if (!json?.outAmount) throw new Error(json?.error ?? "no quote")

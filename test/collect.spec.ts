@@ -71,6 +71,14 @@ describe("collect (mocked upstreams)", () => {
 		expect(await count("size_tests")).toBe(0);
 	});
 
+	it("does not record a timeout or network failure as unquotable", async () => {
+		mockFetch({ ultra: () => { throw new DOMException("timed out", "TimeoutError"); } });
+		const { inserted } = await call();
+		expect(inserted).toBe(0);
+		expect(await count("measurements")).toBe(0);
+		expect(await count("size_tests")).toBe(0);
+	});
+
 	it("still records a genuine 'no quote' as unquotable", async () => {
 		mockFetch({ ultra: () => json({ error: "no route" }, 400) });
 		const { inserted } = await call();
