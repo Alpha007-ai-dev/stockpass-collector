@@ -38,9 +38,9 @@ export function buildCurve(rows: { size_usd: number; n: number; entry: number | 
 }
 
 const CURVE_SQL = `SELECT size_usd, COUNT(entry_bps) AS n, AVG(entry_bps) AS entry, AVG(exit_bps) AS exit FROM (
-    SELECT size_usd, entry_bps, exit_bps FROM measurements WHERE symbol = ?1 AND market_state = ?2 AND quotable = 1 AND ts > ?3
+    SELECT size_usd, entry_bps, exit_bps FROM measurements WHERE symbol = ?1 AND market_state = ?2 AND quotable = 1 AND entry_bps < 200 AND ts > ?3
     UNION ALL
-    SELECT size_usd, entry_bps, exit_bps FROM size_tests WHERE symbol = ?1 AND market_state = ?2 AND quotable = 1 AND ts > ?3
+    SELECT size_usd, entry_bps, exit_bps FROM size_tests WHERE symbol = ?1 AND market_state = ?2 AND quotable = 1 AND entry_bps < 200 AND ts > ?3
   ) GROUP BY size_usd ORDER BY size_usd`
 
 export async function handleSizeCurve(url: URL, env: InsightsEnv): Promise<Response> {
@@ -92,6 +92,7 @@ export async function handleMultiplierChanges(env: InsightsEnv): Promise<Respons
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getMultipleAccounts", params: [list.map((t) => t.mint), { encoding: "jsonParsed" }] }),
+      signal: AbortSignal.timeout(8000),
     })
     if (!res.ok) return json({ error: "rpc unavailable" }, 502)
     const body: any = await res.json()

@@ -48,7 +48,7 @@ async function resolve(env: Env, tickers: string[]): Promise<Token[]> {
       // Searching the bare ticker ("GS") returns meme coins first and can bury the real tokens, so also search each issuer's symbol.
       const found: any[] = []
       for (const q of [t + "x", t + "on", t]) {
-        const res = await fetch(SEARCH + q)
+        const res = await fetch(SEARCH + q, { signal: AbortSignal.timeout(8000) })
         if (!res.ok) throw new Error(`jupiter search ${res.status}`)
         const part: any = await res.json()
         if (Array.isArray(part)) found.push(...part)
@@ -86,6 +86,7 @@ async function mintInfo(tokens: Token[], rpc: string): Promise<Record<string, { 
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getMultipleAccounts", params: [tokens.map((t) => t.mint), { encoding: "jsonParsed" }] }),
+    signal: AbortSignal.timeout(8000),
   })
   if (!res.ok) throw new Error(`rpc ${res.status}`)
   const json: any = await res.json()
@@ -103,12 +104,21 @@ async function mintInfo(tokens: Token[], rpc: string): Promise<Record<string, { 
   return out
 }
 
+const CORS = { "Access-Control-Allow-Origin": "*" }
+const BASE58 = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/
+
+// Admin key travels in a header, not in the URL, so it does not end up in logs or browser history.
+function isAdmin(req: Request, env: Env): boolean {
+  const key = req.headers.get("x-admin-key")
+  return !!env.ADMIN_KEY && !!key && key === env.ADMIN_KEY
+}
+
 class TransientError extends Error {}
 
 // A rate limit or upstream outage says nothing about the token, so it must not be recorded as
 // "quotable = 0". Callers skip the measurement on TransientError.
 async function orderOut(inputMint: string, outputMint: string, amount: string): Promise<string> {
-  const res = await fetch(`${ULTRA}?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}`)
+  const res = await fetch(`${ULTRA}?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}`, { signal: AbortSignal.timeout(8000) })
   if (res.status === 429 || res.status >= 500) throw new TransientError(`jupiter ${res.status}`)
   const json: any = await res.json().catch(() => null)
   if (!json?.outAmount) throw new Error(json?.error ?? "no quote")
@@ -124,6 +134,7 @@ async function collectReference(env: Env) {
     const url = `https://data.alpaca.markets/v2/stocks/quotes/latest?symbols=${REFERENCE_TICKERS.join(",")}&feed=iex`
     const res = await fetch(url, {
       headers: { "APCA-API-KEY-ID": env.ALPACA_KEY, "APCA-API-SECRET-KEY": env.ALPACA_SECRET },
+      signal: AbortSignal.timeout(8000),
     })
     const json: any = await res.json()
     const rows: any[] = []
@@ -178,6 +189,7 @@ async function collect(env: Env) {
       const raw = await orderOut(USDC, t.mint, String(SIZE_USD * 1e6))
       await sleep(400)
       const shares = (Number(raw) / 10 ** t.decimals) * m
+      if (!Number.isFinite(shares) || shares <= 0) throw new Error("invalid share amount")
       const back = await orderOut(t.mint, USDC, raw)
       await sleep(400)
       const buy = SIZE_USD / shares
@@ -209,6 +221,7 @@ async function collect(env: Env) {
         const raw = await orderOut(USDC, pick.mint, String(size * 1e6))
         await sleep(400)
         const shares = (Number(raw) / 10 ** pick.decimals) * pm
+        if (!Number.isFinite(shares) || shares <= 0) throw new Error("invalid share amount")
         const back = await orderOut(pick.mint, USDC, raw)
         await sleep(400)
         const buy = size / shares
@@ -232,7 +245,7 @@ async function collect(env: Env) {
   return rows.length
 }
 
-export default {
+const worker = {
   async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext) {
     if (event.cron === "0 3 * * *") {
       ctx.waitUntil(syncEarnings(env))
@@ -241,11 +254,11 @@ export default {
     }
     ctx.waitUntil(collect(env))
   },
-  async fetch(req: Request, env: Env): Promise<Response> {
+  async handle(req: Request, env: Env): Promise<Response> {
     const url = new URL(req.url)
 
     // Admin endpoints: they trigger work against Jupiter, D1 and Finnhub, so they need the admin key.
-    if ((url.pathname === "/resolve" || url.pathname === "/run" || url.pathname === "/underlying-sync") && (!env.ADMIN_KEY || url.searchParams.get("key") !== env.ADMIN_KEY)) {
+    if ((url.pathname === "/resolve" || url.pathname === "/run" || url.pathname === "/underlying-sync") && !isAdmin(req, env)) {
       return Response.json({ error: "unauthorized" }, { status: 401 })
     }
 
@@ -262,8 +275,9 @@ export default {
 
     if (url.pathname === "/holdings") {
       const owner = url.searchParams.get("owner")
-      if (!owner) return Response.json({ error: "owner required" }, { status: 400 })
-      if (!env.RPC_URL) return Response.json({ error: "RPC not configured" }, { status: 500 })
+      if (!owner || !BASE58.test(owner)) return Response.json({ error: "valid owner address required" }, { status: 400, headers: CORS })
+      if (!env.RPC_URL) return Response.json({ error: "RPC not configured" }, { status: 500, headers: CORS })
+      if (await isLimited(env.RATE_LIMITER, req, "holdings")) return Response.json({ error: "rate limited" }, { status: 429, headers: CORS })
 
       const { results: tokenRows } = await env.DB.prepare("SELECT ticker, symbol, issuer, mint, decimals FROM tokens").all()
       const byMint = new Map((tokenRows as any[]).map((t) => [t.mint, t]))
@@ -279,9 +293,10 @@ export default {
             jsonrpc: "2.0", id: 1, method: "getTokenAccountsByOwner",
             params: [owner, { programId }, { encoding: "jsonParsed" }],
           }),
+          signal: AbortSignal.timeout(8000),
         })
-        const json: any = await res.json()
-        if (json.error) return Response.json({ error: json.error.message }, { status: 502 })
+        const json: any = res.ok ? await res.json().catch(() => null) : null
+        if (!json || json.error) return Response.json({ error: "could not read wallet" }, { status: 502, headers: CORS })
         for (const acc of json.result?.value ?? []) {
           const info = acc.account?.data?.parsed?.info
           const raw = Number(info?.tokenAmount?.amount ?? 0)
@@ -329,7 +344,7 @@ export default {
       const out: any[] = []
 
       const get = async (path: string) => {
-        const r = await fetch(`https://finnhub.io/api/v1${path}&token=${key}`)
+        const r = await fetch(`https://finnhub.io/api/v1${path}&token=${key}`, { signal: AbortSignal.timeout(8000) })
         if (!r.ok) return null
         return r.json().catch(() => null)
       }
@@ -403,7 +418,8 @@ export default {
         .split(",").map((s) => s.trim()).filter(Boolean).slice(0, 25)
       if (!symbols.length) return Response.json({ error: "symbols required" }, { status: 400 })
 
-      const hours = Math.min(168, Math.max(1, Number(url.searchParams.get("hours") ?? "24")))
+      const hRaw = Number(url.searchParams.get("hours") ?? "24")
+      const hours = Number.isFinite(hRaw) ? Math.min(168, Math.max(1, Math.floor(hRaw))) : 24
       const cutoff = Math.floor(Date.now() / 1000) - hours * 3600
       const marks = symbols.map(() => "?").join(",")
 
@@ -430,7 +446,7 @@ export default {
     }
 
     if (url.pathname === "/rebuild-cache") {
-      if (!env.ADMIN_KEY || url.searchParams.get("key") !== env.ADMIN_KEY) {
+      if (!isAdmin(req, env)) {
         return Response.json({ error: "unauthorized" }, { status: 401 })
       }
       await buildReliabilityCache(env)
@@ -520,7 +536,7 @@ export default {
       let complete = true
       for (const m of MARKETS) {
         try {
-          const res = await fetch(`https://api.kamino.finance/kamino-market/${m.pubkey}/reserves/metrics`)
+          const res = await fetch(`https://api.kamino.finance/kamino-market/${m.pubkey}/reserves/metrics`, { signal: AbortSignal.timeout(8000) })
           if (!res.ok) throw new Error(`kamino ${res.status}`)
           const rows: any = await res.json()
           // What a collateral holder pays is the rate of the asset they borrow, not the rate of
@@ -587,7 +603,8 @@ export default {
 
     if (url.pathname === "/series") {
       const t = url.searchParams.get("ticker")
-      if (!t || !/^[A-Za-z0-9]{1,16}$/.test(t)) return Response.json({ error: "ticker required" }, { status: 400 })
+      if (!t || !/^[A-Za-z0-9]{1,16}$/.test(t)) return Response.json({ error: "ticker required" }, { status: 400, headers: CORS })
+      if (!(TICKERS as readonly string[]).includes(t)) return Response.json({ error: "unknown ticker" }, { status: 404, headers: CORS })
       const h = Number(url.searchParams.get("hours") ?? 24)
       const hours = Number.isFinite(h) ? Math.min(Math.max(Math.floor(h), 1), 24 * 14) : 24
 
@@ -621,9 +638,11 @@ export default {
       if (!symbol) return new Response("symbol required", { status: 400 })
       const row: any = await env.DB.prepare("SELECT icon FROM tokens WHERE symbol = ?").bind(symbol).first()
       if (!row?.icon) return new Response("not found", { status: 404 })
+      if (!/^https:\/\//i.test(String(row.icon))) return new Response("not found", { status: 404 })
       const upstream = await fetch(row.icon, {
         headers: { "User-Agent": "Mozilla/5.0", Accept: "image/*,*/*" },
         redirect: "follow",
+        signal: AbortSignal.timeout(8000),
       })
       if (!upstream.ok) return new Response("upstream error", { status: 502 })
       return new Response(upstream.body, {
@@ -631,6 +650,8 @@ export default {
           "Content-Type": upstream.headers.get("Content-Type") ?? "image/png",
           "Cache-Control": "public, max-age=86400",
           "Access-Control-Allow-Origin": "*",
+          "X-Content-Type-Options": "nosniff",
+          "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'",
         },
       })
     }
@@ -686,10 +707,23 @@ export default {
       })
     }
 
+    if (url.pathname !== "/") return Response.json({ error: "not found" }, { status: 404, headers: CORS })
     const { results } = await env.DB.prepare(
       "SELECT symbol, issuer, market_state, entry_bps, exit_bps, quotable, ts FROM measurements ORDER BY ts DESC LIMIT 20",
     ).all()
-    return Response.json(results)
+    return Response.json(results, { headers: CORS })
+  },
+}
+
+export default {
+  scheduled: worker.scheduled,
+  async fetch(req: Request, env: Env): Promise<Response> {
+    try {
+      return await worker.handle(req, env)
+    } catch (e: any) {
+      console.error(`unhandled ${new URL(req.url).pathname}: ${String(e?.message ?? e)}`)
+      return Response.json({ error: "internal error" }, { status: 500, headers: CORS })
+    }
   },
 }
 
@@ -730,7 +764,7 @@ async function syncEarnings(env: Env): Promise<void> {
   for (const t of tickers) {
     try {
       const r = await fetch(
-        `https://finnhub.io/api/v1/calendar/earnings?symbol=${t}&from=${today}&to=${plus120}&token=${env.FINNHUB_KEY}`
+        `https://finnhub.io/api/v1/calendar/earnings?symbol=${t}&from=${today}&to=${plus120}&token=${env.FINNHUB_KEY}`, { signal: AbortSignal.timeout(8000) }
       )
       if (!r.ok) continue
       const j: any = await r.json()
@@ -757,14 +791,14 @@ async function buildReliabilityCache(env: Env): Promise<void> {
             COUNT(*) AS samples,
             COUNT(DISTINCT symbol) AS tokens,
             ROUND(AVG(CASE WHEN quotable=1 THEN 1.0 ELSE 0.0 END)*100, 1) AS availability,
-            ROUND(AVG(CASE WHEN quotable=1 AND entry_bps BETWEEN 0 AND 200 THEN entry_bps END), 1) AS avg_entry
+            ROUND(AVG(CASE WHEN quotable=1 AND entry_bps < 200 THEN MAX(entry_bps, 0) END), 1) AS avg_entry
      FROM measurements GROUP BY issuer`
   ).all()
 
   const { results: perToken } = await env.DB.prepare(
     `SELECT issuer, ticker, symbol, COUNT(*) AS samples, SUM(quotable) AS q,
             ROUND(AVG(CASE WHEN quotable=1 THEN 1.0 ELSE 0.0 END)*100, 0) AS availability,
-            ROUND(AVG(CASE WHEN quotable=1 AND entry_bps BETWEEN 0 AND 200 THEN entry_bps END), 1) AS avg_entry
+            ROUND(AVG(CASE WHEN quotable=1 AND entry_bps < 200 THEN MAX(entry_bps, 0) END), 1) AS avg_entry
      FROM measurements GROUP BY issuer, symbol`
   ).all()
 

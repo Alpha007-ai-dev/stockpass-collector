@@ -18,6 +18,9 @@
 			"database_name": "stockpass",
 			"database_id": "55df56e9-c9b2-47d0-b29e-a27ae262d8e2"
 		}
+	],
+	"ratelimits": [
+		{ "name": "RATE_LIMITER", "namespace_id": "1001", "simple": { "limit": 60, "period": 60 } }
 	]
 	/**
 	 * Smart Placement

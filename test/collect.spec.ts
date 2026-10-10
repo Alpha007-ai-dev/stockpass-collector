@@ -36,8 +36,6 @@ describe("collect (mocked upstreams)", () => {
 	beforeAll(async () => {
 		await run(schema);
 		await run(tokens);
-		// icon/name were added to the live table after tokens.sql was written
-		await run("ALTER TABLE tokens ADD COLUMN icon TEXT; ALTER TABLE tokens ADD COLUMN name TEXT");
 		await run(sizeTests);
 		await run(responseCache);
 	});
