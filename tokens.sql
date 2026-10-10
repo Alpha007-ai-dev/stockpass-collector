@@ -4,5 +4,7 @@
   issuer TEXT NOT NULL,
   mint TEXT NOT NULL,
   decimals INTEGER NOT NULL,
+  icon TEXT,
+  name TEXT,
   updated_at INTEGER NOT NULL
 );
