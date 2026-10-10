@@ -19,6 +19,9 @@ describe("evaluate", () => {
 		expect(evaluate(5, { ts: NOW - MAX_AGE_S - 1, entry_bps: 1, quotable: 1 }, NOW).triggered).toBe(false);
 		expect(evaluate(5, { ts: NOW, entry_bps: 1, quotable: 0 }, NOW).triggered).toBe(false);
 		expect(evaluate(5, null, NOW).triggered).toBe(false);
+		const noMarket = evaluate(500, { ts: NOW, entry_bps: 250, quotable: 1 }, NOW);
+		expect(noMarket.triggered).toBe(false);
+		expect(noMarket.current_bps).toBeNull();
 	});
 });
 

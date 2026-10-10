@@ -36,8 +36,6 @@ describe("collect (mocked upstreams)", () => {
 	beforeAll(async () => {
 		await run(schema);
 		await run(tokens);
-		// icon/name were added to the live table after tokens.sql was written
-		await run("ALTER TABLE tokens ADD COLUMN icon TEXT; ALTER TABLE tokens ADD COLUMN name TEXT");
 		await run(sizeTests);
 		await run(responseCache);
 	});
@@ -52,7 +50,7 @@ describe("collect (mocked upstreams)", () => {
 
 	const call = async () => {
 		const ctx = createExecutionContext();
-		const res = await worker.fetch(new Request("http://x/run"), env as any, ctx);
+		const res = await worker.fetch(new Request("http://x/run", { headers: { "x-admin-key": "test-key" } }), { ...env, ADMIN_KEY: "test-key" } as any, ctx);
 		await waitOnExecutionContext(ctx);
 		return res.json() as Promise<{ inserted: number }>;
 	};

@@ -40,7 +40,7 @@ It also records a **traditional reference quote** (bid/ask/mid) for the same tic
 | `multiplier` | on-chain token multiplier |
 | `supply` | total token supply |
 
-Around 3,500–5,000 rows per day across 110+ tokens.
+Around 3,500–5,000 rows per day across the whole token registry (`GET /tokens` returns the current list).
 
 ---
 
@@ -53,17 +53,17 @@ Around 3,500–5,000 rows per day across 110+ tokens.
 | `GET /size-curve?symbol=TSLAon&state=open` | average measured cost at $100, $1,000 and $10,000 over the last 14 days, per market state; sizes with fewer than 3 observations are left out |
 | `GET /multiplier-changes` | tokens whose share multiplier changed in the last 14 days or is scheduled to change (read from the mint's scaled-amount configuration, cached 10 min) |
 | `GET /tokens` | the token registry: ticker, symbol, issuer, mint, decimals, icon, name |
-| `GET /collateral` | Kamino lending terms (max LTV, borrow APY, supply APY, market size), cached for 10 minutes; if Kamino is down the last complete copy is served |
+| `GET /collateral` | Kamino lending terms per collateral token: `maxLtv`, `supplyApy`, `marketUsd`, and `borrowApy` = the cheapest stablecoin borrow rate in that market (`debtSymbol` names it, `debt` lists the stablecoins USDC/USDG/PYUSD/USDT with their rates). It is the cost of borrowing against the token, not the token's own rate. Cached for 10 minutes; if Kamino is down the last complete copy is served |
 | `GET/POST/DELETE /alerts` | Cost alerts keyed by wallet address ("SPYx entry cost <= N bps", max 10 per wallet). `GET ?owner=` returns each alert with the current cost and whether it is triggered (fresh quote, at most 90 minutes old). Not authenticated, nothing sensitive stored; evaluated on read, no push |
-| `GET /swap/order`, `POST /swap/execute` | Relay for Jupiter Swap V2 (`api.jup.ag/swap/v2`); the API key stays in the Worker. Only stock <-> USDC/SOL/SKR pairs are relayed, params are whitelisted, nothing is cached. Returns 503 until `JUPITER_API_KEY` is set |
+| `GET /swap/order`, `POST /swap/execute` | Relay for Jupiter Swap V2 (`api.jup.ag/swap/v2`); the API key stays in the Worker. `GET /swap/order` only relays stock <-> USDC/SOL/SKR pairs; `POST /swap/execute` relays a signed order id and does not check the pair itself. Params are whitelisted, nothing is cached. Returns 503 until `JUPITER_API_KEY` is set |
 | `GET /explain-anomaly?symbol=SPYx` | `{ anomaly: false, reason }` while the latest entry cost is inside the token's observed range (same market state, last 14 days, 3 bps tolerance). Otherwise the evidence (current cost, typical range, observations, market state, availability, next earnings) plus a short factual note written by Claude. Cached for 15 minutes; Claude is only called when there is an anomaly |
-| `GET /holdings?owner=<address>` | tokenized-stock holdings and USDC balance for a wallet |
+| `GET /holdings?owner=<address>` | tokenized-stock holdings plus USDC and SKR balances for a wallet. Validates the address, rate limited |
 | `GET /logo?symbol=SPYx` | proxies the issuer's token logo (some issuers serve SVG that mobile cannot fetch directly) |
-| `GET /prices?symbols=SPYx,SPYon&hours=24` | price history for the given symbols, used for portfolio sparklines |
-| `GET /reliability?symbol=SPYx` | how often a token had an executable quote, by market state |
+| `GET /prices?symbols=SPYx,SPYon&hours=24` | the price each symbol had about `hours` ago (1–168, up to 25 symbols), used for 24h change in the portfolio |
+| `GET /reliability?symbol=SPYx` | how often a token had an executable quote, with issuer-level figures from a cache rebuilt daily |
 | `GET /underlying?ticker=SPY` | company profile and upcoming events for a stock |
 
-Admin endpoints need `?key=<ADMIN_KEY>` and return 401 without it:
+Admin endpoints need the header `x-admin-key: <ADMIN_KEY>` (not a query parameter, so the key stays out of logs) and return 401 without it, for example `curl -H "x-admin-key: $KEY" https://<worker>/run`:
 
 | Endpoint | Does |
 |---|---|
@@ -84,7 +84,7 @@ Tokens are discovered from Jupiter's verified token list, not hardcoded:
 - **Ondo** — symbol ends in `on` (e.g. `SPYon`)
 - **Backpack Securities** — symbol is the ticker plus `bp` (e.g. `HOODbp`), identified by issuer metadata in the token name
 
-Adding a fourth issuer means adding one detection rule. The app needs no changes.
+Adding a fourth issuer means extending the detection rules in `resolve`. The app needs no changes.
 
 ---
 
@@ -93,9 +93,9 @@ Adding a fourth issuer means adding one detection rule. The app needs no changes
 ```bash
 npm install
 npx wrangler d1 create stockpass          # then put the id in wrangler.jsonc
-npx wrangler d1 execute stockpass --remote --file=schema.sql
-npx wrangler d1 execute stockpass --remote --file=reference.sql
-npx wrangler d1 execute stockpass --remote --file=alerts.sql
+for f in schema tokens size-tests response-cache reliability-cache token-reliability underlying reference alerts indexes; do
+  npx wrangler d1 execute stockpass --remote --file=$f.sql
+done
 ```
 
 ### Secrets
@@ -112,7 +112,7 @@ npx wrangler secret put JUPITER_API_KEY # /swap/* (Swap V2 routes, optional)
 
 The Worker runs without the Alpaca keys — it simply skips the traditional reference and the app hides that section.
 
-`/swap/*` and `/alerts` can be rate limited per IP. Add a Cloudflare Rate Limiting binding named `RATE_LIMITER` to `wrangler.jsonc` and the Worker uses it; without the binding nothing is limited:
+`/swap/*`, `/alerts` and `/holdings` are rate limited per IP through the `RATE_LIMITER` binding that `wrangler.jsonc` already declares (without the binding nothing is limited and the Worker still runs):
 
 ```jsonc
 "ratelimits": [{ "name": "RATE_LIMITER", "namespace_id": "1001", "simple": { "limit": 60, "period": 60 } }]
@@ -124,7 +124,9 @@ Without `ANTHROPIC_API_KEY`, `/explain-anomaly` still returns the evidence with 
 npx wrangler deploy
 ```
 
-The cron trigger (`*/5 * * * *`) starts collecting immediately.
+Two cron triggers run: `*/5 * * * *` collects, `0 3 * * *` refreshes earnings dates and the reliability cache. Collecting starts immediately.
+
+The Worker is meant for the Workers Paid plan with D1 Paid: the measurement volume and the daily cache rebuild exceed the free limits.
 
 ---
 
@@ -132,7 +134,7 @@ The cron trigger (`*/5 * * * *`) starts collecting immediately.
 
 **Round trip, not spread.** We buy and immediately sell, then split the loss evenly. This is what a user actually experiences, and it includes routing, price impact and fees — not a theoretical mid-price spread.
 
-**Rotation over frequency.** Measuring 120+ tokens every 5 minutes would exceed the Worker's subrequest budget. Instead a slice is measured each run, so each token is sampled roughly every 50 minutes. Execution costs move slowly (1–4 bps per hour in our data), so this is enough for historical context; the app fetches a live quote at the moment of trading.
+**Rotation over frequency.** Measuring every token every 5 minutes would exceed the Worker's subrequest budget. Instead a slice is measured each run, so each token is sampled roughly every 50 minutes. Execution costs move slowly (1–4 bps per hour in our data), so this is enough for historical context; the app fetches a live quote at the moment of trading.
 
 **Negative costs are real but not exploitable.** Some tokens occasionally quote a round trip below zero, because Jupiter finds different routes in each direction. The app displays these as `~0 bps` rather than implying a profit.
 

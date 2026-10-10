@@ -13,6 +13,7 @@ export interface AlertsEnv {
 }
 
 export const MAX_ALERTS_PER_OWNER = 10
+const NO_MARKET_BPS = 200
 export const MAX_AGE_S = 5400 // a measurement older than 90 minutes is not a current reading
 export const MIN_THRESHOLD_BPS = 0
 export const MAX_THRESHOLD_BPS = 200
@@ -39,7 +40,10 @@ export function evaluate(
   nowTs: number,
 ): { current_bps: number | null; measured_at: number | null; triggered: boolean } {
   if (!latest || Number(latest.quotable) !== 1 || latest.entry_bps == null) return { current_bps: null, measured_at: latest ? Number(latest.ts) : null, triggered: false }
-  const current = Math.max(0, Number(latest.entry_bps))
+  const raw = Number(latest.entry_bps)
+  // 200+ bps means there was no real market at that moment: not a price to alert on, not a number to show.
+  if (raw >= NO_MARKET_BPS) return { current_bps: null, measured_at: Number(latest.ts), triggered: false }
+  const current = Math.max(0, raw)
   const fresh = nowTs - Number(latest.ts) <= MAX_AGE_S
   return { current_bps: current, measured_at: Number(latest.ts), triggered: fresh && current <= threshold }
 }
