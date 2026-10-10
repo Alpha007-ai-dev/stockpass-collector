@@ -50,7 +50,7 @@ describe("collect (mocked upstreams)", () => {
 
 	const call = async () => {
 		const ctx = createExecutionContext();
-		const res = await worker.fetch(new Request("http://x/run"), env as any, ctx);
+		const res = await worker.fetch(new Request("http://x/run", { headers: { "x-admin-key": "test-key" } }), { ...env, ADMIN_KEY: "test-key" } as any, ctx);
 		await waitOnExecutionContext(ctx);
 		return res.json() as Promise<{ inserted: number }>;
 	};
