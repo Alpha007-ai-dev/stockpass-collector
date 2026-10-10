@@ -504,13 +504,14 @@ export default {
       // and never touch the Kamino API.
       const TTL = 600
       const nowTs = Math.floor(Date.now() / 1000)
-      const hit: any = await env.DB.prepare("SELECT body, updated_at FROM response_cache WHERE key = ?").bind("collateral").first()
+      const hit: any = await env.DB.prepare("SELECT body, updated_at FROM response_cache WHERE key = ?").bind("collateral_v2").first()
       const respond = (body: string, state: string, maxAge: number) =>
         new Response(body, {
           headers: { "Content-Type": "application/json", "Cache-Control": `max-age=${maxAge}`, "Access-Control-Allow-Origin": "*", "X-Cache": state },
         })
       if (hit && nowTs - Number(hit.updated_at) < TTL) return respond(String(hit.body), "hit", 300)
 
+      const STABLE_DEBT = new Set(["USDC", "USDG", "PYUSD", "USDT"])
       const MARKETS = [
         { name: "Kamino xStocks Market", pubkey: "5wJeMrUYECGq41fxRESKALVcHnNX26TAWy4W98yULsua" },
         { name: "Kamino Sentora xStocks", pubkey: "8BNUWRSibVasaAmhYpBCFpGgMisGKfVAf9ho3Cmf6vjr" },
@@ -522,6 +523,13 @@ export default {
           const res = await fetch(`https://api.kamino.finance/kamino-market/${m.pubkey}/reserves/metrics`)
           if (!res.ok) throw new Error(`kamino ${res.status}`)
           const rows: any = await res.json()
+          // What a collateral holder pays is the rate of the asset they borrow, not the rate of
+          // borrowing the stock itself: stablecoin reserves that are actually being borrowed here.
+          const debt = (rows ?? [])
+            .filter((r: any) => STABLE_DEBT.has(r.liquidityToken) && Number(r.totalBorrowUsd) > 0)
+            .map((r: any) => ({ symbol: String(r.liquidityToken), borrowApy: Number(r.borrowApy) }))
+            .sort((a: any, b: any) => a.borrowApy - b.borrowApy)
+          if (!debt.length) { complete = false; continue }
           for (const r of rows ?? []) {
             const ltv = Number(r.maxLtv)
             if (!ltv) continue
@@ -530,7 +538,9 @@ export default {
               mint: r.liquidityTokenMint,
               market: m.name,
               maxLtv: ltv,
-              borrowApy: Number(r.borrowApy),
+              borrowApy: debt[0].borrowApy,
+              debtSymbol: debt[0].symbol,
+              debt,
               supplyApy: Number(r.supplyApy),
               marketUsd: Math.round(Number(r.totalSupplyUsd ?? 0)),
             })
@@ -546,7 +556,7 @@ export default {
       if (complete && out.length) {
         await env.DB.prepare(
           "INSERT INTO response_cache (key, body, updated_at) VALUES (?,?,?) ON CONFLICT(key) DO UPDATE SET body=excluded.body, updated_at=excluded.updated_at"
-        ).bind("collateral", body, nowTs).run()
+        ).bind("collateral_v2", body, nowTs).run()
         return respond(body, "miss", 300)
       }
       // Kamino failed (or answered for one market only): prefer the last complete copy, however old.
